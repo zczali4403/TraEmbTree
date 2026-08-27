@@ -21,3 +21,5 @@ landmark_tree*/
 
 # Interrupted atomic-build directories
 .*.building-*/
+
+metacell2_stagebin_results/
