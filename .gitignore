@@ -1,0 +1,23 @@
+__pycache__/
+*.py[cod]
+.DS_Store
+.venv/
+venv/
+
+# Local data and generated results
+data/
+results/
+landmark_nodes*/
+landmark_tree*/
+*.npy
+*.npz
+*.parquet
+*.h5ad
+*.graphml
+*.png
+*.pdf
+*.csv
+*.tsv
+
+# Interrupted atomic-build directories
+.*.building-*/
