@@ -136,8 +136,22 @@ def extract_csr_rows(
     if not pieces:
         return sp.csr_matrix((0, shape[1]), dtype=np.int32)
     matrix = sp.vstack(pieces, format="csr")
-    if np.any(matrix.data < 0) or np.any(matrix.data != np.rint(matrix.data)):
-        raise ValueError("X is not a non-negative integer UMI-count matrix")
+    if np.any(~np.isfinite(matrix.data)):
+        raise ValueError("X contains non-finite expression values")
+    if np.any(matrix.data < 0):
+        raise ValueError("X contains negative expression values")
+    rounded = np.rint(matrix.data)
+    fractional = matrix.data != rounded
+    if np.any(fractional):
+        count = int(np.sum(fractional))
+        maximum = float(np.max(np.abs(matrix.data[fractional] - rounded[fractional])))
+        print(
+            f"warning: rounding {count:,}/{matrix.data.size:,} nonzero expression "
+            f"values to UMI counts (maximum adjustment={maximum:.6g})",
+            flush=True,
+        )
+        matrix.data = rounded
+        matrix.eliminate_zeros()
     # MetaCell2 expects integer-valued UMI counts stored as float32.
     matrix.data = matrix.data.astype(np.float32, copy=False)
     matrix.sort_indices()
