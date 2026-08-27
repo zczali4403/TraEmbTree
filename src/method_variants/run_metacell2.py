@@ -138,8 +138,8 @@ def extract_csr_rows(
     matrix = sp.vstack(pieces, format="csr")
     if np.any(matrix.data < 0) or np.any(matrix.data != np.rint(matrix.data)):
         raise ValueError("X is not a non-negative integer UMI-count matrix")
-    if matrix.data.size and matrix.data.max() <= np.iinfo(np.int32).max:
-        matrix.data = matrix.data.astype(np.int32, copy=False)
+    # MetaCell2 expects integer-valued UMI counts stored as float32.
+    matrix.data = matrix.data.astype(np.float32, copy=False)
     matrix.sort_indices()
     return matrix
 
@@ -205,6 +205,8 @@ def main() -> None:
         var=pd.DataFrame(index=pd.Index(genes, name="gene")),
     )
     adata.var_names_make_unique()
+    # No dataset-specific lateral-gene blacklist was supplied.
+    adata.var["lateral_gene"] = False
     mc.ut.set_processors_count(args.threads)
     print(f"running MetaCell2 {mc.__version__} with {args.threads} threads", flush=True)
     mc.pl.divide_and_conquer_pipeline(
