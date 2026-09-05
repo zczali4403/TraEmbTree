@@ -40,9 +40,9 @@ def log(s):
 
 def parse_args():
     p = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    p.add_argument("--embeddings", type=Path, default=HERE / "embeddings.npy")
-    p.add_argument("--csr-dir", type=Path, default=Path("/scratch/amlt_code/traemb_csr_0811"))
-    p.add_argument("--metadata", type=Path, default=Path("/mnt/input/sc_cz/Concord/data/all_lineage_260811.csv"))
+    p.add_argument("--embeddings", type=Path, default=Path("/mnt/input/sc_cz/Concord/eval/2026_09_03/embeddings.npy"))
+    p.add_argument("--csr-dir", type=Path, default=Path("/scratch/amlt_code/traemb_csr_0829"))
+    p.add_argument("--metadata", type=Path, default=Path("/mnt/input/sc_cz/Concord/data/all_lineage_260829.csv"))
     p.add_argument("--output-dir", type=Path, default=HERE / "landmark_nodes")
     p.add_argument("--target-nodes", type=int, default=500)
     p.add_argument("--min-nodes-per-lineage", type=int, default=10)
@@ -212,6 +212,4 @@ def main():
         if out.exists(): shutil.rmtree(out)
         tmp.rename(out); log(f"done: {out}")
     except Exception:
-        log(f"failed; partial output kept at {tmp}"); raise
-
-if __name__ == "__main__": main()
+        log(f"failed; partial output kept at {tmp}"); r

@@ -23,7 +23,7 @@ Use absolute paths and label every node ID::
     /home/aiscuser/.conda/envs/train/bin/python build_landmark_tree.py \
       --nodes /mnt/input/sc_cz/Concord/eval/2026_08_19/landmark_nodes/nodes.parquet \
       --embeddings /mnt/input/sc_cz/Concord/eval/2026_08_19/landmark_nodes/node_embeddings.npy \
-      --metadata /mnt/input/sc_cz/Concord/data/all_lineage_260811.csv \
+      --metadata /mnt/input/sc_cz/Concord/data/all_lineage_260829.csv \
       --output-dir /mnt/input/sc_cz/Concord/eval/2026_08_19/landmark_tree \
       --label-nodes
 
@@ -64,7 +64,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--metadata", type=Path,
-        default=Path("/mnt/input/sc_cz/Concord/data/all_lineage_260811.csv"),
+        default=Path("/mnt/input/sc_cz/Concord/data/all_lineage_260829.csv"),
     )
     parser.add_argument("--output-dir", type=Path, default=here / "landmark_tree")
     parser.add_argument("--metadata-chunk-size", type=int, default=500_000)

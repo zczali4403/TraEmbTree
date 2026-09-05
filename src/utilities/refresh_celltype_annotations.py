@@ -9,7 +9,7 @@ def parse():
  p.add_argument('--input-dir',type=Path,action='append',required=True)
  p.add_argument('--metadata',type=Path,required=True)
  p.add_argument('--lineage',default='Liver')
- p.add_argument('--csr-dir',type=Path,default=Path('/scratch/amlt_code/traemb_csr_0811'))
+ p.add_argument('--csr-dir',type=Path,default=Path('/scratch/amlt_code/traemb_csr_0829'))
  p.add_argument('--chunk-size',type=int,default=500000)
  p.add_argument('--backup-tag',default='before_celltype_refresh')
  return p.parse_args()

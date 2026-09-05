@@ -62,8 +62,8 @@ def log(message: str) -> None:
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    p.add_argument("--embeddings", type=Path, default=HERE / "embeddings.npy")
-    p.add_argument("--csr-dir", type=Path, default=Path("/scratch/amlt_code/traemb_csr_0811"))
+    p.add_argument("--embeddings", type=Path, default=Path("/mnt/input/sc_cz/Concord/eval/2026_09_03/embeddings.npy"))
+    p.add_argument("--csr-dir", type=Path, default=Path("/scratch/amlt_code/traemb_csr_0829"))
     p.add_argument("--metadata", type=Path, default=HERE / "all_lineage_260811_liver_reanno.csv")
     p.add_argument("--output-dir", type=Path, default=HERE / "landmark_nodes_density_lineage_stage")
     p.add_argument("--target-nodes", type=int, default=2000)
@@ -533,7 +533,3 @@ def main() -> None:
     except Exception:
         log(f"failed; partial outputs kept: {temporary}")
         raise
-
-
-if __name__ == "__main__":
-    main()

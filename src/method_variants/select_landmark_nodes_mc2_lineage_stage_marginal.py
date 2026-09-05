@@ -37,8 +37,8 @@ def log(x): print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {x}",flush=True)
 
 def args_parser():
     p=argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    p.add_argument('--embeddings',type=Path,default=HERE/'embeddings.npy')
-    p.add_argument('--csr-dir',type=Path,default=Path('/scratch/amlt_code/traemb_csr_0811'))
+    p.add_argument('--embeddings',type=Path,default=Path('/mnt/input/sc_cz/Concord/eval/2026_09_03/embeddings.npy'))
+    p.add_argument('--csr-dir',type=Path,default=Path('/scratch/amlt_code/traemb_csr_0829'))
     p.add_argument('--metadata',type=Path,default=Path('/mnt/input/sc_cz/Concord/eval/2026_08_19/all_lineage_260811_liver_reanno.csv'))
     p.add_argument('--output-dir',type=Path,default=HERE/'landmark_nodes_mc2_lineage_stage_marginal')
     p.add_argument('--target-nodes',type=int,default=2000)
@@ -364,5 +364,4 @@ def main():
         if out.exists():shutil.rmtree(out)
         tmp.rename(out);log(f'done: {out}')
     except Exception:
-        log(f'failed; partial outputs kept: {tmp}');raise
-if __name__=='__main__':main()
+        log(f'failed; partial outputs kept: {tm
