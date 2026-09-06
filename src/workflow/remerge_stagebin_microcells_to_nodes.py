@@ -23,6 +23,7 @@ mean marginal cosine-coverage gain, followed by the original weighted
 from __future__ import annotations
 
 import argparse
+import heapq
 import json
 import math
 import os
@@ -33,9 +34,9 @@ from pathlib import Path
 import numpy as np
 
 from select_landmark_nodes_mc2_lineage_stagebin_marginal import (
-    allocate_by_microcell_gain,
-    graph_partition,
     normalize,
+    cosine_knn_edges,
+    balanced_knn_region_partition,
 )
 
 HERE = Path(__file__).resolve().parent
@@ -71,6 +72,107 @@ def weighted_quantile(values: np.ndarray, weights: np.ndarray, q: float) -> floa
     cumulative = np.cumsum(weights)
     return float(values[min(np.searchsorted(cumulative, q * cumulative[-1]), len(values) - 1)])
 
+
+
+class DSU:
+    def __init__(self,n,weights=None):
+        self.p=np.arange(n); self.w=np.ones(n,dtype=np.int64) if weights is None else np.asarray(weights,dtype=np.int64).copy(); self.n=n
+    def find(self,x):
+        while self.p[x]!=x: self.p[x]=self.p[self.p[x]]; x=self.p[x]
+        return int(x)
+    def union(self,a,b,cap=None):
+        a=self.find(a); b=self.find(b)
+        if a==b or (cap is not None and self.w[a]+self.w[b]>cap): return False
+        if self.w[a]<self.w[b]: a,b=b,a
+        self.p[b]=a; self.w[a]+=self.w[b]; self.n-=1; return True
+    def labels(self):
+        roots=np.asarray([self.find(i) for i in range(len(self.p))]); _,lab=np.unique(roots,return_inverse=True); return lab.astype(np.int32)
+
+def graph_partition(vectors,target_size,min_size,max_size,weights=None,target_groups=None,k=30):
+    n=len(vectors); weights=np.ones(n,dtype=np.int64) if weights is None else np.asarray(weights,dtype=np.int64)
+    if target_groups is None: target_groups=max(1,int(round(weights.sum()/target_size)))
+    target_groups=min(target_groups,n)
+    if target_groups==n: return np.arange(n,dtype=np.int32)
+    # Cell-level pile partition: enforce balanced nonempty groups exactly.
+    if np.all(weights==1):
+        return balanced_knn_region_partition(vectors,target_groups,k)
+    # Weighted microcell-to-landmark aggregation.
+    src,dst,score=cosine_knn_edges(vectors,k); order=np.argsort(-score); dsu=DSU(n,weights)
+    cap=max_size if max_size is not None else None
+    for e in order:
+        if dsu.n<=target_groups: break
+        dsu.union(int(src[e]),int(dst[e]),cap)
+    # Relax cap only when graph connectivity/size constraints prevent requested count.
+    for e in order:
+        if dsu.n<=target_groups: break
+        dsu.union(int(src[e]),int(dst[e]),None)
+    # kNN graph should be connected; if not, merge closest component centroids.
+    while dsu.n>target_groups:
+        lab=dsu.labels(); m=int(lab.max())+1; z=normalize(vectors)
+        sums=np.zeros((m,z.shape[1]),np.float64); np.add.at(sums,lab,z*weights[:,None]); sums=normalize(sums)
+        np.fill_diagonal((sim:=sums@sums.T),-np.inf); a,b=np.unravel_index(np.argmax(sim),sim.shape)
+        ia=int(np.flatnonzero(lab==a)[0]); ib=int(np.flatnonzero(lab==b)[0]); dsu.union(ia,ib,None)
+    labels=dsu.labels()
+    # Attach undersized components to their closest component; only used locally.
+    if min_size and target_groups>1:
+        sizes=np.bincount(labels,weights=weights); small=np.flatnonzero(sizes<min_size)
+        if len(small):
+            z=normalize(vectors); sums=np.zeros((len(sizes),z.shape[1]),np.float64); np.add.at(sums,labels,z*weights[:,None]); cent=normalize(sums)
+            for g in small:
+                candidates=np.flatnonzero(sizes>=min_size)
+                if not len(candidates): break
+                to=int(candidates[np.argmax(cent[candidates]@cent[g])]); labels[labels==g]=to; sizes[to]+=sizes[g]; sizes[g]=0
+            _,labels=np.unique(labels,return_inverse=True); labels=labels.astype(np.int32)
+    return labels
+
+def allocate_by_microcell_gain(center_sets,total,minimum,k,density_power):
+    """Allocate landmark counts by normalized mean coverage gain over microcells."""
+    n_strata=len(center_sets)
+    if total<n_strata:raise ValueError(f'target-nodes={total} is below {n_strata} nonempty strata')
+    if total>sum(len(x) for x in center_sets):raise ValueError('target-nodes exceeds total final microcells')
+    states=[];heap=[]
+
+    def next_proposal(state):
+        if len(state['selected'])>=len(state['z']):return None
+        score=state['nearest'].astype(np.float64)*np.power(state['density_rank'],density_power)
+        score[np.asarray(state['selected'],dtype=np.int64)]=-np.inf
+        candidate=int(np.argmax(score));distance=np.maximum(0.,1.-state['z']@state['z'][candidate]).astype(np.float32)
+        gain=float(np.maximum(0.,state['nearest']-distance).mean())
+        return candidate,distance,gain
+
+    for centers in center_sets:
+        z=normalize(centers);m=len(z)
+        if m==1:density=np.ones(1,np.float32)
+        else:
+            kk=min(max(1,k),m-1);index=__import__('faiss').IndexFlatIP(z.shape[1]);index.add(z)
+            similarity,_=index.search(z,kk+1)
+            density=(1./np.maximum(np.maximum(0.,1.-similarity[:,1:]).mean(1),1e-8)).astype(np.float32)
+        order=np.argsort(density,kind='stable');rank=np.empty(m,np.float32);rank[order]=(np.arange(m,dtype=np.float32)+1)/m
+        first=int(np.argmax(density));nearest=np.maximum(0.,1.-z@z[first]).astype(np.float32)
+        state=dict(z=z,density_rank=rank,selected=[first],nearest=nearest,proposal=None)
+        while len(state['selected'])<min(max(1,minimum),m):
+            proposal=next_proposal(state)
+            if proposal is None:break
+            candidate,distance,_=proposal;state['selected'].append(candidate);state['nearest']=np.minimum(state['nearest'],distance)
+        states.append(state)
+
+    allocated=sum(len(s['selected']) for s in states)
+    if allocated>total:raise ValueError('minimum nodes per stratum exceeds target-nodes')
+    for si,state in enumerate(states):
+        state['proposal']=next_proposal(state)
+        if state['proposal'] is not None:heapq.heappush(heap,(-state['proposal'][2],si,len(state['selected'])))
+    while allocated<total:
+        while heap:
+            negative_gain,si,version=heapq.heappop(heap);state=states[si]
+            if version==len(state['selected']) and state['proposal'] is not None:break
+        else:raise RuntimeError('no stratum can accept remaining nodes')
+        candidate,distance,gain=state['proposal'];state['selected'].append(candidate)
+        state['nearest']=np.minimum(state['nearest'],distance);allocated+=1
+        if allocated%25==0 or allocated==total:
+            log(f'marginal node allocation {allocated:,}/{total:,}: stratum={si}; nodes={len(state["selected"])}; mean_gain={gain:.6g}')
+        state['proposal']=next_proposal(state)
+        if state['proposal'] is not None:heapq.heappush(heap,(-state['proposal'][2],si,len(state['selected'])))
+    return np.asarray([len(s['selected']) for s in states],dtype=np.int32)
 
 def main() -> None:
     args = parse_args()
@@ -206,7 +308,7 @@ def main() -> None:
             lineage_id, lineage = node_lineage[node]
             bin_id, bin_left, bin_right, bin_label = node_bins[node]
             node_rows.append(dict(
-                node_id=node, lineage=lineage, lineage_id=lineage_id,
+                node_id=node, stage_source=str(frame.iloc[0].get("stage_source", "original_stage")), lineage=lineage, lineage_id=lineage_id,
                 constraint_stage_id=bin_id, constraint_stage=(bin_left + bin_right) / 2,
                 stage_bin_id=bin_id, stage_bin_left=bin_left,
                 stage_bin_right=bin_right, stage_bin_label=bin_label,

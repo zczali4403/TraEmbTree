@@ -1,28 +1,9 @@
 #!/usr/bin/env python3
-# MC2-inspired stage-bin microcells with marginal landmark allocation.
-#
-# Full-data example (use --stage-bin-width 2 for two-stage bins):
-#   OPENBLAS_NUM_THREADS=32 OMP_NUM_THREADS=32 MKL_NUM_THREADS=32 \
-#   /home/aiscuser/.conda/envs/train/bin/python \
-#     /mnt/input/sc_cz/Concord/eval/2026_08_19/select_landmark_nodes_mc2_lineage_stagebin_marginal.py \
-#     --target-nodes 1000 \
-#     --stage-bin-width 1 \
-#     --output-dir /mnt/input/sc_cz/Concord/eval/2026_08_19/landmark_nodes_mc2_lineage_stagebin1_marginal \
-#     --overwrite
-#
-# Quick small test:
-#   .../python select_landmark_nodes_mc2_lineage_stagebin_marginal.py --max-cells 100000 \
-#     --target-nodes 100 --stage-bin-width 2 --output-dir stagebin_test --overwrite
-"""MC2-inspired TraEmb selection within hard lineage x fixed-width stage bins.
+"""Construct and annotate microcells within lineage x fixed-width time bins.
 
-This is not the original gene/UMI-based Metacell-2 implementation. It borrows
-its two-pass pile/refinement design, replacing expression similarity by cosine
-kNN graphs. All final node coordinates are arithmetic means of original (not
-L2-transformed) TraEmb vectors.
-The two microcell passes are unchanged. Only the final per-stratum landmark
-quota is allocated after all microcells exist, using normalized mean marginal
-cosine-coverage gain over equally weighted microcell centers instead of
-observed cell counts.
+Two embedding-only partition passes produce microcells and cell assignments.
+Cell types are aggregated only after grouping. Use the existing remerge
+scripts separately when landmark nodes are needed.
 """
 from __future__ import annotations
 import os
@@ -42,20 +23,19 @@ def args_parser():
     p.add_argument('--embeddings',type=Path,default=Path('/mnt/input/sc_cz/Concord/eval/2026_09_03/embeddings.npy'))
     p.add_argument('--csr-dir',type=Path,default=Path('/scratch/amlt_code/traemb_csr_0829'))
     p.add_argument('--metadata',type=Path,default=Path('/mnt/input/sc_cz/Concord/eval/2026_08_19/all_lineage_260811_liver_reanno.csv'))
-    p.add_argument('--output-dir',type=Path,default=HERE/'landmark_nodes_mc2_lineage_stagebin_marginal')
+    p.add_argument('--output-dir',type=Path,default=HERE/'stagebin_microcells')
+    p.add_argument('--predicted-stage',type=Path,default=None,help='CSV with idx, cell_id, predicted_stage; replaces original stage for binning and all stage summaries.')
     p.add_argument('--stage-bin-width',type=float,default=1.0,help='Width of fixed stage bins.')
     p.add_argument('--stage-bin-origin',type=float,default=0.0,help='Fixed origin anchoring stage-bin boundaries.')
-    p.add_argument('--target-nodes',type=int,default=2000)
-    p.add_argument('--min-nodes-per-stratum',type=int,default=1,help='Minimum nodes per nonempty lineage x stage stratum.')
-    p.add_argument('--quota-power',type=float,default=.5)
-    p.add_argument('--allocation-knn',type=int,default=30,help='Microcell neighbors used for density in marginal node allocation.')
-    p.add_argument('--allocation-density-power',type=float,default=1.0,help='Density strength when proposing each additional node.')
     p.add_argument('--pile-size',type=int,default=20000)
     p.add_argument('--microcell-size',type=int,default=500)
     p.add_argument('--microcell-min-size',type=int,default=200)
     p.add_argument('--microcell-max-size',type=int,default=1000)
+    p.add_argument('--microcell-method',choices=('cohesive','balanced'),default='cohesive',help='Embedding-only cohesive regions, or legacy balanced groups.')
+    p.add_argument('--microcell-radius-factor',type=float,default=2.0,help='Local cosine-distance multiplier for cohesive grouping.')
+    p.add_argument('--microcell-mutual-knn',action='store_true',help='Require reciprocal neighbors in cohesive grouping; may increase fragmentation.')
     p.add_argument('--knn',type=int,default=30)
-    p.add_argument('--regroup-knn',type=int,default=64)
+    p.add_argument('--regroup-knn',type=int,default=64,help='Neighbors of microcell centers for forming second-pass piles.')
     p.add_argument('--metadata-chunk-size',type=int,default=500000)
     p.add_argument('--seed',type=int,default=42)
     p.add_argument('--faiss-threads',type=int,default=32)
@@ -68,28 +48,6 @@ def normalize(x):
     z/=np.maximum(np.linalg.norm(z,axis=1,keepdims=True),1e-12)
     return z
 
-def allocate(counts,total,minimum,power):
-    active=counts>0; n=int(active.sum())
-    if total<n: raise ValueError(f'target-nodes must be >= nonempty strata ({n})')
-    q=np.zeros(len(counts),dtype=int); base=min(minimum,total//n); q[active]=base
-    left=total-int(q.sum()); w=np.where(active,counts.astype(float)**power,0); raw=left*w/w.sum()
-    q+=np.floor(raw).astype(int)
-    for i in np.argsort(-(raw-np.floor(raw)))[:total-int(q.sum())]: q[i]+=1
-    return q
-
-class DSU:
-    def __init__(self,n,weights=None):
-        self.p=np.arange(n); self.w=np.ones(n,dtype=np.int64) if weights is None else np.asarray(weights,dtype=np.int64).copy(); self.n=n
-    def find(self,x):
-        while self.p[x]!=x: self.p[x]=self.p[self.p[x]]; x=self.p[x]
-        return int(x)
-    def union(self,a,b,cap=None):
-        a=self.find(a); b=self.find(b)
-        if a==b or (cap is not None and self.w[a]+self.w[b]>cap): return False
-        if self.w[a]<self.w[b]: a,b=b,a
-        self.p[b]=a; self.w[a]+=self.w[b]; self.n-=1; return True
-    def labels(self):
-        roots=np.asarray([self.find(i) for i in range(len(self.p))]); _,lab=np.unique(roots,return_inverse=True); return lab.astype(np.int32)
 
 def cosine_knn_edges(vectors,k):
     import faiss
@@ -140,43 +98,6 @@ def balanced_knn_region_partition(vectors,target_groups,k):
     return labels
 
 
-def graph_partition(vectors,target_size,min_size,max_size,weights=None,target_groups=None,k=30):
-    n=len(vectors); weights=np.ones(n,dtype=np.int64) if weights is None else np.asarray(weights,dtype=np.int64)
-    if target_groups is None: target_groups=max(1,int(round(weights.sum()/target_size)))
-    target_groups=min(target_groups,n)
-    if target_groups==n: return np.arange(n,dtype=np.int32)
-    # Cell-level pile partition: enforce balanced nonempty groups exactly.
-    if np.all(weights==1):
-        return balanced_knn_region_partition(vectors,target_groups,k)
-    # Weighted microcell-to-landmark aggregation.
-    src,dst,score=cosine_knn_edges(vectors,k); order=np.argsort(-score); dsu=DSU(n,weights)
-    cap=max_size if max_size is not None else None
-    for e in order:
-        if dsu.n<=target_groups: break
-        dsu.union(int(src[e]),int(dst[e]),cap)
-    # Relax cap only when graph connectivity/size constraints prevent requested count.
-    for e in order:
-        if dsu.n<=target_groups: break
-        dsu.union(int(src[e]),int(dst[e]),None)
-    # kNN graph should be connected; if not, merge closest component centroids.
-    while dsu.n>target_groups:
-        lab=dsu.labels(); m=int(lab.max())+1; z=normalize(vectors)
-        sums=np.zeros((m,z.shape[1]),np.float64); np.add.at(sums,lab,z*weights[:,None]); sums=normalize(sums)
-        np.fill_diagonal((sim:=sums@sums.T),-np.inf); a,b=np.unravel_index(np.argmax(sim),sim.shape)
-        ia=int(np.flatnonzero(lab==a)[0]); ib=int(np.flatnonzero(lab==b)[0]); dsu.union(ia,ib,None)
-    labels=dsu.labels()
-    # Attach undersized components to their closest component; only used locally.
-    if min_size and target_groups>1:
-        sizes=np.bincount(labels,weights=weights); small=np.flatnonzero(sizes<min_size)
-        if len(small):
-            z=normalize(vectors); sums=np.zeros((len(sizes),z.shape[1]),np.float64); np.add.at(sums,labels,z*weights[:,None]); cent=normalize(sums)
-            for g in small:
-                candidates=np.flatnonzero(sizes>=min_size)
-                if not len(candidates): break
-                to=int(candidates[np.argmax(cent[candidates]@cent[g])]); labels[labels==g]=to; sizes[to]+=sizes[g]; sizes[g]=0
-            _,labels=np.unique(labels,return_inverse=True); labels=labels.astype(np.int32)
-    return labels
-
 def split_groups(indices,labels):
     order=np.argsort(labels,kind='stable'); labs=labels[order]; cuts=np.flatnonzero(np.r_[True,labs[1:]!=labs[:-1],True])
     return [indices[order[cuts[i]:cuts[i+1]]] for i in range(len(cuts)-1)]
@@ -207,7 +128,7 @@ def hash_strings(x):
     import pandas as pd
     return pd.util.hash_array(np.asarray(x,dtype=object),categorize=False).astype(np.uint64,copy=False)
 
-def celltype_tables(metadata,cell_ids,assignment,n_nodes,chunk):
+def celltype_tables(metadata,cell_ids,assignment,n_microcells,chunk):
     import pandas as pd
     n=len(cell_ids); hashes=np.empty(n,np.uint64)
     for lo in range(0,n,chunk): hashes[lo:min(n,lo+chunk)]=hash_strings(cell_ids[lo:min(n,lo+chunk)])
@@ -216,70 +137,42 @@ def celltype_tables(metadata,cell_ids,assignment,n_nodes,chunk):
         rows_seen+=len(df); h=hash_strings(df.cell.astype(str).to_numpy()); pos=np.searchsorted(hs,h); ok=pos<n; ok&=hs[np.minimum(pos,n-1)]==h
         rr=order[pos[ok]]; ct=df.loc[ok,'celltype'].fillna('Unknown').astype(str).to_numpy()
         valid=rr<len(assignment); rr=rr[valid]; ct=ct[valid]
-        for node,name in zip(np.asarray(assignment[rr]),ct): counts[(int(node),name)]+=1
+        for micro_id,name in zip(np.asarray(assignment[rr]),ct): counts[(int(micro_id),name)]+=1
         matched+=len(rr); log(f'celltype matched {matched:,}/{rows_seen:,}')
     summary=[]; comp=[]
     by=defaultdict(list)
-    for (node,ct),c in counts.items():by[node].append((ct,c))
-    for node in range(n_nodes):
-        vals=sorted(by[node],key=lambda x:(-x[1],x[0])); total=sum(x[1] for x in vals)
-        for rank,(ct,c) in enumerate(vals,1):comp.append(dict(node_id=node,celltype=ct,cell_count=c,fraction=c/total,rank=rank))
+    for (micro_id,ct),c in counts.items():by[micro_id].append((ct,c))
+    for micro_id in range(n_microcells):
+        vals=sorted(by[micro_id],key=lambda x:(-x[1],x[0])); total=sum(x[1] for x in vals)
+        for rank,(ct,c) in enumerate(vals,1):comp.append(dict(microcell_id=micro_id,celltype=ct,cell_count=c,fraction=c/total,rank=rank))
         dom,dc=vals[0] if vals else ('Unknown',0)
-        summary.append(dict(node_id=node,dominant_celltype=dom,celltype_purity=dc/total if total else np.nan,dominant_celltype_count=dc,celltype_types=len(vals),celltype_matched_cells=total))
+        summary.append(dict(microcell_id=micro_id,dominant_celltype=dom,celltype_purity=dc/total if total else np.nan,dominant_celltype_count=dc,celltype_types=len(vals),celltype_matched_cells=total))
     return summary,comp,matched
 
-def allocate_by_microcell_gain(center_sets,total,minimum,k,density_power):
-    """Allocate landmark counts by normalized mean coverage gain over microcells."""
-    n_strata=len(center_sets)
-    if total<n_strata:raise ValueError(f'target-nodes={total} is below {n_strata} nonempty strata')
-    if total>sum(len(x) for x in center_sets):raise ValueError('target-nodes exceeds total final microcells')
-    states=[];heap=[]
 
-    def next_proposal(state):
-        if len(state['selected'])>=len(state['z']):return None
-        score=state['nearest'].astype(np.float64)*np.power(state['density_rank'],density_power)
-        score[np.asarray(state['selected'],dtype=np.int64)]=-np.inf
-        candidate=int(np.argmax(score));distance=np.maximum(0.,1.-state['z']@state['z'][candidate]).astype(np.float32)
-        gain=float(np.maximum(0.,state['nearest']-distance).mean())
-        return candidate,distance,gain
+def partition_microcells(vectors, args):
+    if args.microcell_method == 'balanced':
+        count=min(len(vectors),max(1,int(round(len(vectors)/args.microcell_size))))
+        if count==len(vectors):return np.arange(count,dtype=np.int32)
+        return balanced_knn_region_partition(vectors,count,args.knn)
+    from cohesive_microcells import cohesive_partition
+    return cohesive_partition(vectors, args.microcell_size, args.microcell_min_size,
+                              args.microcell_max_size, k=args.knn,
+                              radius_factor=args.microcell_radius_factor,
+                              mutual=args.microcell_mutual_knn)
 
-    for centers in center_sets:
-        z=normalize(centers);m=len(z)
-        if m==1:density=np.ones(1,np.float32)
-        else:
-            kk=min(max(1,k),m-1);index=__import__('faiss').IndexFlatIP(z.shape[1]);index.add(z)
-            similarity,_=index.search(z,kk+1)
-            density=(1./np.maximum(np.maximum(0.,1.-similarity[:,1:]).mean(1),1e-8)).astype(np.float32)
-        order=np.argsort(density,kind='stable');rank=np.empty(m,np.float32);rank[order]=(np.arange(m,dtype=np.float32)+1)/m
-        first=int(np.argmax(density));nearest=np.maximum(0.,1.-z@z[first]).astype(np.float32)
-        state=dict(z=z,density_rank=rank,selected=[first],nearest=nearest,proposal=None)
-        while len(state['selected'])<min(max(1,minimum),m):
-            proposal=next_proposal(state)
-            if proposal is None:break
-            candidate,distance,_=proposal;state['selected'].append(candidate);state['nearest']=np.minimum(state['nearest'],distance)
-        states.append(state)
-
-    allocated=sum(len(s['selected']) for s in states)
-    if allocated>total:raise ValueError('minimum nodes per stratum exceeds target-nodes')
-    for si,state in enumerate(states):
-        state['proposal']=next_proposal(state)
-        if state['proposal'] is not None:heapq.heappush(heap,(-state['proposal'][2],si,len(state['selected'])))
-    while allocated<total:
-        while heap:
-            negative_gain,si,version=heapq.heappop(heap);state=states[si]
-            if version==len(state['selected']) and state['proposal'] is not None:break
-        else:raise RuntimeError('no stratum can accept remaining nodes')
-        candidate,distance,gain=state['proposal'];state['selected'].append(candidate)
-        state['nearest']=np.minimum(state['nearest'],distance);allocated+=1
-        if allocated%25==0 or allocated==total:
-            log(f'marginal node allocation {allocated:,}/{total:,}: stratum={si}; nodes={len(state["selected"])}; mean_gain={gain:.6g}')
-        state['proposal']=next_proposal(state)
-        if state['proposal'] is not None:heapq.heappush(heap,(-state['proposal'][2],si,len(state['selected'])))
-    return np.asarray([len(s['selected']) for s in states],dtype=np.int32)
 
 def main():
     a=args_parser(); import faiss, pandas as pd
     if not np.isfinite(a.stage_bin_width) or a.stage_bin_width<=0:raise ValueError('stage-bin-width must be positive and finite')
+    if a.microcell_method == 'cohesive':
+        if not 1 <= a.microcell_min_size <= a.microcell_size <= a.microcell_max_size:
+            raise ValueError('require 1 <= microcell-min-size <= microcell-size <= microcell-max-size')
+        if a.knn < 1 or not np.isfinite(a.microcell_radius_factor) or a.microcell_radius_factor <= 0:
+            raise ValueError('knn and microcell-radius-factor must be positive and finite')
+    for name in ('pile_size','microcell_size','knn','regroup_knn','metadata_chunk_size','faiss_threads'):
+        if getattr(a,name)<1:raise ValueError(f'{name} must be positive')
+    if a.max_cells is not None and a.max_cells<1:raise ValueError('max-cells must be positive')
     faiss.omp_set_num_threads(a.faiss_threads)
     out=a.output_dir.resolve(); tmp=out.with_name(f'.{out.name}.building-{os.getpid()}')
     if out.exists() and not a.overwrite: raise FileExistsError(f'{out} exists; use --overwrite')
@@ -287,24 +180,35 @@ def main():
     tmp.mkdir(parents=True)
     try:
         emb=np.load(a.embeddings,mmap_mode='r'); full_n,dim=emb.shape; n=min(full_n,a.max_cells) if a.max_cells else full_n
+        if n<1:raise ValueError('embedding input must contain cells')
         md=json.loads((a.csr_dir/'metadata.json').read_text()); names=md['lineages']; lineage=np.load(a.csr_dir/'lineage_ids.npy',mmap_mode='r')[:n]
-        stage_id=np.load(a.csr_dir/'stage_ids.npy',mmap_mode='r')[:n]; cell_ids=np.load(a.csr_dir/'cell_ids.npy',mmap_mode='r')[:n]
-        stages=np.asarray(md['stages'],dtype=np.float32)
-        cell_stage=stages[np.asarray(stage_id,dtype=np.int32)]
-        stage_bin_id=np.floor((cell_stage-a.stage_bin_origin)/a.stage_bin_width).astype(np.int32)
+        all_cell_ids=np.load(a.csr_dir/'cell_ids.npy',mmap_mode='r'); cell_ids=all_cell_ids[:n]
+        if len(all_cell_ids)!=full_n or len(lineage)!=n:
+            raise ValueError('embedding and CSR cell/lineage rows are not aligned')
+        if a.predicted_stage is not None:
+            from predicted_stage import load_predicted_stage
+            log(f'loading and validating predicted stage: {a.predicted_stage}')
+            cell_stage=load_predicted_stage(a.predicted_stage,all_cell_ids,a.metadata_chunk_size)[:n]
+            stage_source='predicted_stage'
+        else:
+            stage_id=np.load(a.csr_dir/'stage_ids.npy',mmap_mode='r')[:n]
+            if len(stage_id)!=n:raise ValueError('stage_ids and embeddings are not row-aligned')
+            stages=np.asarray(md['stages'],dtype=np.float64)
+            cell_stage=stages[np.asarray(stage_id,dtype=np.int32)]
+            stage_source='original_stage'
+        bins=np.floor((cell_stage-a.stage_bin_origin)/a.stage_bin_width)
+        if not np.isfinite(bins).all() or np.any(bins<np.iinfo(np.int32).min) or np.any(bins>np.iinfo(np.int32).max):
+            raise ValueError('non-finite stages/origin or stage bins outside int32 range')
+        stage_bin_id=bins.astype(np.int32)
+        log(f'stage source={stage_source}; range=[{cell_stage.min():.6g}, {cell_stage.max():.6g}]')
         min_bin=int(stage_bin_id.min());n_bins=int(stage_bin_id.max())-min_bin+1
         stratum_key=np.asarray(lineage,dtype=np.int64)*n_bins+(np.asarray(stage_bin_id,dtype=np.int64)-min_bin)
         stratum_order=np.argsort(stratum_key,kind='stable'); sorted_key=stratum_key[stratum_order]
         unique_keys,starts,stratum_counts=np.unique(sorted_key,return_index=True,return_counts=True)
-        if a.target_nodes<len(unique_keys):
-            raise ValueError(f'target-nodes={a.target_nodes} is below {len(unique_keys)} nonempty lineage x stage-bin strata')
-        assignment=np.lib.format.open_memmap(tmp/'cell_to_node.npy',mode='w+',dtype=np.int32,shape=(n,)); assignment[:]=-1
         micro_assignment=np.lib.format.open_memmap(tmp/'cell_to_microcell.npy',mode='w+',dtype=np.int32,shape=(n,)); micro_assignment[:]=-1
-        all_node_groups=[]; node_lineages=[]; node_constraint_stages=[]
         all_micro_groups=[]; micro_lineages=[]; micro_constraint_stages=[]
-        stratum_phase2=[];stratum_centers=[];stratum_weights=[];stratum_info=[];stratum_cell_counts=[];stratum_micro_starts=[]
         rng=np.random.default_rng(a.seed)
-        log(f'input={n:,} x {dim}; nonempty lineage-stage-bin strata={len(unique_keys):,}; bin_width={a.stage_bin_width:g}; final nodes={a.target_nodes}')
+        log(f'input={n:,} x {dim}; nonempty lineage-stage-bin strata={len(unique_keys):,}; bin_width={a.stage_bin_width:g}')
         for stratum_index,(key,start,count) in enumerate(zip(unique_keys,starts,stratum_counts)):
             lid=int(key//n_bins);bid=int(key%n_bins)+min_bin;name=names[lid]
             bin_left=float(a.stage_bin_origin+bid*a.stage_bin_width);bin_right=float(bin_left+a.stage_bin_width);bin_label=f'[{bin_left:g},{bin_right:g})'
@@ -312,72 +216,52 @@ def main():
             log(f'stratum {stratum_index+1}/{len(unique_keys)}: lineage={name}; stage_bin={bin_label}; cells={len(ids):,}')
             perm=rng.permutation(ids); phase1=[]
             for pi,lo in enumerate(range(0,len(perm),a.pile_size)):
-                pile=perm[lo:lo+a.pile_size]; lab=graph_partition(emb[pile],a.microcell_size,a.microcell_min_size,a.microcell_max_size,k=a.knn)
+                pile=perm[lo:lo+a.pile_size]; lab=partition_microcells(emb[pile],a)
                 phase1.extend(split_groups(pile,lab)); log(f'  phase1 pile {pi+1}/{math.ceil(len(perm)/a.pile_size)} -> total microcells={len(phase1):,}')
             centers=raw_means(emb,phase1); piles=coherent_piles(phase1,centers,a.pile_size,a.regroup_knn); phase2=[]
             for pi,parts in enumerate(piles):
-                pile=np.concatenate(parts); lab=graph_partition(emb[pile],a.microcell_size,a.microcell_min_size,a.microcell_max_size,k=a.knn)
+                pile=np.concatenate(parts); lab=partition_microcells(emb[pile],a)
                 phase2.extend(split_groups(pile,lab)); log(f'  phase2 pile {pi+1}/{len(piles)} -> total microcells={len(phase2):,}')
-            micro_centers=raw_means(emb,phase2);weights=np.asarray([len(g) for g in phase2],dtype=np.int64)
-            stratum_phase2.append(phase2);stratum_centers.append(micro_centers);stratum_weights.append(weights)
-            stratum_info.append((lid,name,bid,bin_left,bin_right,bin_label));stratum_cell_counts.append(len(ids));stratum_micro_starts.append(len(all_micro_groups))
             for members in phase2:
                 micro_id=len(all_micro_groups);micro_assignment[members]=micro_id;all_micro_groups.append(members)
                 micro_lineages.append((lid,name));micro_constraint_stages.append((bid,bin_left,bin_right,bin_label))
-            log(f'  retained {len(phase2):,} final microcells; landmark quota deferred')
+            log(f'  retained {len(phase2):,} final microcells')
         if np.any(micro_assignment<0):raise RuntimeError(f'{np.count_nonzero(micro_assignment<0)} cells were not assigned to microcells')
 
-        quota=allocate_by_microcell_gain(stratum_centers,a.target_nodes,a.min_nodes_per_stratum,a.allocation_knn,a.allocation_density_power)
-        micro_to_node=np.full(len(all_micro_groups),-1,dtype=np.int32);offset=0
-        for stratum_index,(phase2,micro_centers,weights,info,cell_count,micro_start) in enumerate(zip(stratum_phase2,stratum_centers,stratum_weights,stratum_info,stratum_cell_counts,stratum_micro_starts)):
-            lid,name,bid,bin_left,bin_right,bin_label=info;q=int(quota[stratum_index]);ideal=max(1,int(math.ceil(cell_count/q)))
-            final_lab=graph_partition(micro_centers,ideal,0,2*ideal,weights=weights,target_groups=q,k=min(a.regroup_knn,max(1,len(phase2)-1)))
-            if len(np.unique(final_lab))!=q:
-                raise RuntimeError(f'{name}: final graph partition produced {len(np.unique(final_lab))}/{q} nodes')
-            for i,members in enumerate(phase2):
-                node=offset+int(final_lab[i]);micro_to_node[micro_start+i]=node;assignment[members]=node
-            for g in range(q):
-                members=np.concatenate([phase2[i] for i in np.flatnonzero(final_lab==g)])
-                all_node_groups.append(members);node_lineages.append((lid,name));node_constraint_stages.append((bid,bin_left,bin_right,bin_label))
-            offset+=q;log(f'  finalized stratum {stratum_index+1}/{len(quota)}: {len(phase2):,} microcells -> {q} nodes')
-        if np.any(micro_to_node<0):raise RuntimeError(f'{np.count_nonzero(micro_to_node<0)} microcells were not assigned to nodes')
-        if np.any(assignment<0):raise RuntimeError(f'{np.count_nonzero(assignment<0)} cells were not assigned to nodes')
-        if np.any(micro_assignment<0):raise RuntimeError(f'{np.count_nonzero(micro_assignment<0)} cells were not assigned to microcells')
-        node_emb=raw_means(emb,all_node_groups); np.save(tmp/'node_embeddings.npy',node_emb)
         micro_emb=raw_means(emb,all_micro_groups); np.save(tmp/'microcell_embeddings.npy',micro_emb)
-        np.save(tmp/'microcell_to_node.npy',np.asarray(micro_to_node,dtype=np.int32))
-        cts,comp,matched=celltype_tables(a.metadata,cell_ids,assignment,len(all_node_groups),a.metadata_chunk_size); ctmap={x['node_id']:x for x in cts}
-        rows=[]
-        for node,g in enumerate(all_node_groups):
-            st=np.asarray(cell_stage[g],dtype=np.float32); center=normalize(node_emb[node:node+1])[0]; sim=(np.asarray(emb[g],np.float32)@center)/np.maximum(np.linalg.norm(np.asarray(emb[g],np.float32),axis=1),1e-12)
-            lid,name=node_lineages[node];bid,bin_left,bin_right,bin_label=node_constraint_stages[node]
-            row=dict(node_id=node,lineage=name,lineage_id=lid,constraint_stage_id=bid,constraint_stage=(bin_left+bin_right)/2,
-                     stage_bin_id=bid,stage_bin_left=bin_left,stage_bin_right=bin_right,stage_bin_label=bin_label,
-                     n_cells=len(g),mean_stage=float(st.mean()),stage_std=float(st.std()),min_stage=float(st.min()),max_stage=float(st.max()),
-                     mean_cosine_distance=float((1-sim).mean()),p95_cosine_distance=float(np.quantile(1-sim,.95)))
-            row.update(ctmap[node]);rows.append(row)
-        pd.DataFrame(rows).to_parquet(tmp/'nodes.parquet',index=False); pd.DataFrame(comp).to_parquet(tmp/'node_celltype_composition.parquet',index=False)
 
         log(f'aggregating cell types for {len(all_micro_groups):,} final microcells')
         mcts,mcomp,mmatched=celltype_tables(a.metadata,cell_ids,micro_assignment,len(all_micro_groups),a.metadata_chunk_size)
-        mctmap={x['node_id']:x for x in mcts}; micro_rows=[]
+        mctmap={x['microcell_id']:x for x in mcts}; micro_rows=[]
         for micro_id,g in enumerate(all_micro_groups):
-            raw=np.asarray(emb[g],np.float32);st=np.asarray(cell_stage[g],dtype=np.float32)
+            raw=np.asarray(emb[g],np.float32);st=np.asarray(cell_stage[g],dtype=np.float64)
             center=normalize(micro_emb[micro_id:micro_id+1])[0]
             sim=(raw@center)/np.maximum(np.linalg.norm(raw,axis=1),1e-12)
-            lid,name=micro_lineages[micro_id];bid,bin_left,bin_right,bin_label=micro_constraint_stages[micro_id];ct=dict(mctmap[micro_id]);ct.pop('node_id',None)
-            row=dict(microcell_id=micro_id,landmark_node_id=int(micro_to_node[micro_id]),lineage=name,lineage_id=lid,
+            lid,name=micro_lineages[micro_id];bid,bin_left,bin_right,bin_label=micro_constraint_stages[micro_id];ct=dict(mctmap[micro_id]);ct.pop('microcell_id',None)
+            row=dict(microcell_id=micro_id,stage_source=stage_source,lineage=name,lineage_id=lid,
                      constraint_stage_id=bid,constraint_stage=(bin_left+bin_right)/2,
                      stage_bin_id=bid,stage_bin_left=bin_left,stage_bin_right=bin_right,stage_bin_label=bin_label,
                      n_cells=len(g),mean_stage=float(st.mean()),stage_std=float(st.std()),min_stage=float(st.min()),max_stage=float(st.max()),
                      mean_cosine_distance=float((1-sim).mean()),p95_cosine_distance=float(np.quantile(1-sim,.95)))
             row.update(ct); micro_rows.append(row)
-        pd.DataFrame(micro_rows).to_parquet(tmp/'microcells.parquet',index=False)
-        micro_comp=pd.DataFrame(mcomp).rename(columns={'node_id':'microcell_id'})
+        micro_table=pd.DataFrame(micro_rows)
+        micro_table['below_min_size']=micro_table.n_cells < a.microcell_min_size
+        micro_table.to_parquet(tmp/'microcells.parquet',index=False)
+        sizes=micro_table.n_cells.to_numpy()
+        grouping_summary=dict(method=a.microcell_method,n_microcells=len(sizes),n_cells=n,
+                              min_size=int(sizes.min()),median_size=float(np.median(sizes)),max_size=int(sizes.max()),
+                              singleton_groups=int(np.count_nonzero(sizes==1)),
+                              below_min_size_groups=int(np.count_nonzero(sizes<a.microcell_min_size)),
+                              below_min_size_cell_fraction=float(sizes[sizes<a.microcell_min_size].sum()/n),
+                              assigned_cell_fraction=float(np.count_nonzero(micro_assignment>=0)/n))
+        (tmp/'microcell_grouping_summary.json').write_text(json.dumps(grouping_summary,indent=2)+'\n')
+        log(f'microcell grouping summary: {grouping_summary}')
+        micro_comp=pd.DataFrame(mcomp,columns=['microcell_id','celltype','cell_count','fraction','rank'])
         micro_comp.to_parquet(tmp/'microcell_celltype_composition.parquet',index=False)
-        cfg={k:str(v) if isinstance(v,Path) else v for k,v in vars(a).items()};cfg.update(n_cells=n,n_nodes=len(rows),n_microcells=len(micro_rows),celltype_matched=matched,microcell_celltype_matched=mmatched,n_nonempty_lineage_stage_bin_strata=len(unique_keys),stage_constraint='fixed_width_stage_bin_hard',stage_bin_boundary='left_closed_right_open',allocation_objective='equal_microcell_weight_normalized_mean_marginal_cosine_coverage_gain',nodes_per_stratum=[int(x) for x in quota],method='embedding_only_mc2_inspired_cosine_knn_two_pass_lineage_fixed_stage_bin_marginal_microcell_allocation')
-        (tmp/'run_config.json').write_text(json.dumps(cfg,indent=2,ensure_ascii=False)); del assignment,micro_assignment
+        cfg={k:str(v) if isinstance(v,Path) else v for k,v in vars(a).items()};cfg.update(stage_source=stage_source,stage_value_column='predicted_stage' if a.predicted_stage is not None else 'stage',n_cells=n,n_microcells=len(micro_rows),microcell_celltype_matched=mmatched,n_nonempty_lineage_stage_bin_strata=len(unique_keys),stage_constraint='fixed_width_stage_bin_hard',stage_bin_boundary='left_closed_right_open',method=f'embedding_only_{a.microcell_method}_cosine_knn_two_pass_lineage_fixed_stage_bin_microcells')
+        (tmp/'run_config.json').write_text(json.dumps(cfg,indent=2,ensure_ascii=False)); del micro_assignment
         if out.exists():shutil.rmtree(out)
         tmp.rename(out);log(f'done: {out}')
     except Exception:
-        log(f'failed; partial outputs kept: {tm
+        log(f'failed; partial outputs kept: {tmp}');raise
+if __name__=='__main__':main()
