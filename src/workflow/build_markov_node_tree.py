@@ -547,6 +547,31 @@ def plot_outputs(nodes, edges, candidate_edges, output, dpi):
     lineages = sorted(nodes.loc[real, "lineage"].astype(str).unique())
     palette = dict(zip(lineages, plt.get_cmap("tab20")(np.linspace(0, 1, len(lineages)))))
 
+    def discrete_colors(size):
+        colors, seen = [], set()
+        for name in ("tab20", "tab20b", "tab20c", "Set1", "Set2", "Set3",
+                     "Dark2", "Paired", "Accent"):
+            for value in plt.get_cmap(name).colors:
+                color = matplotlib.colors.to_hex(value).upper()
+                if color not in seen and color not in {"#FFFFFF", "#000000", "#B0B0B0"}:
+                    seen.add(color)
+                    colors.append(color)
+        if len(colors) < size:
+            # Deterministic golden-ratio hues extend the qualitative palettes.
+            golden = 0.618033988749895
+            index = 0
+            while len(colors) < size:
+                hue = (index * golden) % 1.0
+                saturation = (0.62, 0.78, 0.9)[index % 3]
+                value = (0.68, 0.82, 0.94)[(index // 3) % 3]
+                color = matplotlib.colors.to_hex(
+                    matplotlib.colors.hsv_to_rgb((hue, saturation, value))).upper()
+                if color not in seen:
+                    seen.add(color)
+                    colors.append(color)
+                index += 1
+        return colors[:size]
+
     def save(fig, name):
         fig.savefig(output / f"{name}.png", dpi=dpi, bbox_inches="tight")
         fig.savefig(output / f"{name}.pdf", bbox_inches="tight")
@@ -566,7 +591,8 @@ def plot_outputs(nodes, edges, candidate_edges, output, dpi):
     ax.scatter(nodes.loc[virtual, "tree_x"], nodes.loc[virtual, "tree_y"], marker="*",
                s=55, color="black", zorder=3)
     ax.set(xlabel="Lineage-separated branch layout", ylabel="Predicted stage",
-           title="Markov node tree — lineage")
+           title="Markov node tree — lineage (early to late, top to bottom)")
+    ax.invert_yaxis()
     ax.legend(loc="center left", bbox_to_anchor=(1, .5), fontsize=8, markerscale=2)
     save(fig, "tree_by_lineage")
 
@@ -580,30 +606,33 @@ def plot_outputs(nodes, edges, candidate_edges, output, dpi):
                         linewidths=0, zorder=2)
     fig.colorbar(points, ax=ax, label="Predicted stage")
     ax.set(xlabel="Lineage-separated branch layout", ylabel="Predicted stage",
-           title="Markov node tree — predicted stage")
+           title="Markov node tree — predicted stage (early to late, top to bottom)")
+    ax.invert_yaxis()
     save(fig, "tree_by_stage")
 
     if "dominant_celltype" in nodes:
         labels = nodes.loc[real, "dominant_celltype"].fillna("Unknown").astype(str)
-        weights = nodes.loc[real].assign(_label=labels).groupby("_label").n_cells.sum()
-        top = weights.nlargest(25).index.tolist()
-        colors = dict(zip(top, plt.get_cmap("turbo")(np.linspace(0, 1, len(top)))))
-        fig, ax = plt.subplots(figsize=(24, 11))
+        weights = (nodes.loc[real].assign(_label=labels)
+                   .groupby("_label", sort=False).n_cells.sum().sort_values(ascending=False))
+        celltypes = weights.index.tolist()
+        colors = dict(zip(celltypes, discrete_colors(len(celltypes))))
+        legend_columns = max(1, math.ceil(len(celltypes) / 35))
+        fig, ax = plt.subplots(figsize=(24 + 3 * legend_columns, 11))
         for edge in edges.itertuples(index=False):
             ax.plot([lookup.at[edge.parent_id, "tree_x"], lookup.at[edge.child_id, "tree_x"]],
                     [lookup.at[edge.parent_id, "tree_y"], lookup.at[edge.child_id, "tree_y"]],
                     color="#BBBBBB", linewidth=.3, alpha=.4, zorder=1)
-        plotted = labels.where(labels.isin(top), "(other cell types)")
-        color_values = [colors.get(label, "#777777") for label in plotted]
+        color_values = [colors[label] for label in labels]
         ax.scatter(nodes.loc[real, "tree_x"], nodes.loc[real, "tree_y"],
                    c=color_values, s=7, linewidths=0, zorder=2)
         handles = [Line2D([0], [0], marker="o", linestyle="", color=colors[label], label=label)
-                   for label in top]
-        handles.append(Line2D([0], [0], marker="o", linestyle="", color="#777777",
-                              label="(other cell types)"))
-        ax.legend(handles=handles, loc="center left", bbox_to_anchor=(1, .5), fontsize=8)
+                   for label in celltypes]
+        ax.legend(handles=handles, loc="center left", bbox_to_anchor=(1, .5),
+                  fontsize=7, ncol=legend_columns, markerscale=1.5,
+                  columnspacing=1.0, handletextpad=.35)
         ax.set(xlabel="Lineage-separated branch layout", ylabel="Predicted stage",
-               title="Markov node tree — dominant cell type (evaluation only)")
+               title=f"Markov node tree — all {len(celltypes)} dominant cell types (evaluation only)")
+        ax.invert_yaxis()
         save(fig, "tree_by_dominant_celltype")
 
     if {"node_umap1", "node_umap2"}.issubset(nodes):
