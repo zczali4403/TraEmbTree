@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import re
 import time
 from collections import defaultdict
 from pathlib import Path
@@ -634,6 +635,53 @@ def plot_outputs(nodes, edges, candidate_edges, output, dpi):
                title=f"Markov node tree — all {len(celltypes)} dominant cell types (evaluation only)")
         ax.invert_yaxis()
         save(fig, "tree_by_dominant_celltype")
+
+        pd.DataFrame({
+            "celltype": celltypes,
+            "color": [colors[label] for label in celltypes],
+            "n_cells": [int(weights[label]) for label in celltypes],
+        }).to_csv(output / "celltype_colors.csv", index=False)
+
+        lineage_output = output / "trees_by_lineage_celltype"
+        lineage_output.mkdir()
+        for position, lineage in enumerate(lineages, 1):
+            local_mask = real & nodes.lineage.eq(lineage)
+            local_labels = nodes.loc[local_mask, "dominant_celltype"].fillna("Unknown").astype(str)
+            local_celltypes = [label for label in celltypes if label in set(local_labels)]
+            local_legend_columns = max(1, math.ceil(len(local_celltypes) / 30))
+            fig, ax = plt.subplots(figsize=(12 + 3 * local_legend_columns, 10))
+            local_edges = edges[
+                edges.lineage.eq(lineage) & edges.edge_kind.ne("global_root")]
+            for edge in local_edges.itertuples(index=False):
+                ax.plot([lookup.at[edge.parent_id, "tree_x"],
+                         lookup.at[edge.child_id, "tree_x"]],
+                        [lookup.at[edge.parent_id, "tree_y"],
+                         lookup.at[edge.child_id, "tree_y"]],
+                        color="#999999", linewidth=.55, alpha=.6, zorder=1)
+            ax.scatter(
+                nodes.loc[local_mask, "tree_x"], nodes.loc[local_mask, "tree_y"],
+                c=[colors[label] for label in local_labels], s=14,
+                linewidths=0, zorder=2)
+            local_root = nodes.node_type.eq("lineage_root") & nodes.lineage.eq(lineage)
+            ax.scatter(nodes.loc[local_root, "tree_x"], nodes.loc[local_root, "tree_y"],
+                       marker="*", s=80, color="black", zorder=3, label="Lineage root")
+            handles = [
+                Line2D([0], [0], marker="o", linestyle="", color=colors[label], label=label)
+                for label in local_celltypes]
+            handles.append(Line2D([0], [0], marker="*", linestyle="", color="black",
+                                  markersize=9, label="Lineage root"))
+            ax.legend(handles=handles, loc="center left", bbox_to_anchor=(1, .5),
+                      fontsize=8, ncol=local_legend_columns, markerscale=1.25,
+                      columnspacing=1.0, handletextpad=.35)
+            ax.set(
+                xlabel="Branch layout", ylabel="Predicted stage",
+                title=f"{lineage} — all {len(local_celltypes)} dominant cell types")
+            ax.invert_yaxis()
+            safe_lineage = re.sub(r"[^A-Za-z0-9]+", "_", lineage).strip("_").lower()
+            stem = lineage_output / f"{position:02d}_{safe_lineage}"
+            fig.savefig(stem.with_suffix(".png"), dpi=dpi, bbox_inches="tight")
+            fig.savefig(stem.with_suffix(".pdf"), bbox_inches="tight")
+            plt.close(fig)
 
     if {"node_umap1", "node_umap2"}.issubset(nodes):
         fig, ax = plt.subplots(figsize=(14, 11))
