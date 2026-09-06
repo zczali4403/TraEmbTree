@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 
 
-def evaluate(micro, composition, unknown_labels=('unknown', 'unassigned', '')):
+def evaluate(micro, composition, unknown_labels=('unknown', 'unkown', 'unassigned', '')):
     required = {'microcell_id', 'n_cells', 'lineage'}
     if not required.issubset(micro):
         raise ValueError(f'microcells table requires {sorted(required)}')
@@ -91,9 +91,13 @@ def grouped_summary(frame, column, small_size):
                          for key, group in frame.groupby(column, dropna=False, sort=True)])
 
 
-def plots(frame, by_lineage, output, dpi):
+def plots(frame, by_lineage, output, dpi, unit='microcell'):
     plt.rcParams.update({'pdf.fonttype': 42, 'font.size': 10})
     valid = frame[frame.known_cells > 0]
+    incomplete = bool(frame.unknown_cells.sum() or frame.unmatched_cells.sum())
+    purity_label = 'Purity among known annotations' if incomplete else 'Cell-type purity'
+    cell_label = 'Known cells' if incomplete else 'Cells'
+    weighted_label = 'Weighted by known cells' if incomplete else 'Weighted by cells'
 
     def save(fig, name):
         fig.tight_layout()
@@ -104,16 +108,16 @@ def plots(frame, by_lineage, output, dpi):
     fig, axes = plt.subplots(1, 2, figsize=(11, 4))
     bins = np.linspace(0, 1, 31)
     axes[0].hist(valid.purity, bins=bins, color='#4477AA')
-    axes[0].set(xlabel='Purity among known annotations', ylabel='Microcells', title='Microcell purity')
+    axes[0].set(xlabel=purity_label, ylabel=unit.capitalize()+'s', title=unit.capitalize()+' purity')
     axes[1].hist(valid.purity, bins=bins, weights=valid.known_cells, color='#228833')
-    axes[1].set(xlabel='Purity among known annotations', ylabel='Known cells', title='Purity weighted by known cells')
+    axes[1].set(xlabel=purity_label, ylabel=cell_label, title=weighted_label)
     save(fig, 'purity_distribution')
 
     fig, ax = plt.subplots(figsize=(7, 5))
     if len(valid):
         h = ax.hexbin(valid.n_cells, valid.purity, xscale='log', gridsize=45, mincnt=1, bins='log', cmap='viridis')
-        fig.colorbar(h, ax=ax, label='Microcells per bin')
-    ax.set(xlabel='Cells per microcell (log scale)', ylabel='Purity among known annotations', ylim=(-.02, 1.02))
+        fig.colorbar(h, ax=ax, label=unit.capitalize()+'s per bin')
+    ax.set(xlabel=f'Cells per {unit} (log scale)', ylabel=purity_label, ylim=(-.02, 1.02))
     save(fig, 'purity_vs_size')
 
     # Paginate instead of silently omitting lineages in large datasets.
@@ -122,41 +126,54 @@ def plots(frame, by_lineage, output, dpi):
         part = ordered.iloc[lo:lo+30]
         fig, ax = plt.subplots(figsize=(10, max(4, .32*len(part)+1)))
         y = np.arange(len(part))
-        ax.barh(y-.18, pd.to_numeric(part.mean_purity, errors="coerce"), height=.35, label='Mean per microcell')
-        ax.barh(y+.18, pd.to_numeric(part.known_cell_weighted_purity, errors="coerce"), height=.35, label='Weighted by known cells')
+        ax.barh(y-.18, pd.to_numeric(part.mean_purity, errors="coerce"), height=.35, label=f'Mean per {unit}')
+        ax.barh(y+.18, pd.to_numeric(part.known_cell_weighted_purity, errors="coerce"), height=.35, label=weighted_label)
         for row, value in enumerate(part.mean_purity):
             if pd.isna(value):
                 ax.text(.02, row, "No known annotations", va="center", color="gray")
         ax.set_yticks(y, part.lineage)
-        ax.set(xlim=(0, 1.05), xlabel='Purity among known annotations', title='Purity by lineage')
+        ax.set(xlim=(0, 1.05), xlabel=purity_label, title='Purity by lineage')
         ax.legend(loc='lower right')
         save(fig, f'purity_by_lineage_{page}')
 
     thresholds = np.linspace(0, 1, 101)
     total = frame.n_cells.sum()
     coverage = [valid.loc[valid.purity >= t, 'n_cells'].sum()/total for t in thresholds]
-    conservative = [frame.loc[frame.dominant_fraction_all_cells >= t, 'n_cells'].sum()/total for t in thresholds]
     fig, ax = plt.subplots(figsize=(7, 5))
-    ax.plot(thresholds, coverage, label='Threshold on known-label purity')
-    ax.plot(thresholds, conservative, label='Threshold on dominant / all cells', linestyle='--')
+    ax.plot(thresholds, coverage, label='Threshold on known-label purity' if incomplete else 'Cell coverage')
+    if incomplete:
+        conservative = [frame.loc[frame.dominant_fraction_all_cells >= t, 'n_cells'].sum()/total for t in thresholds]
+        ax.plot(thresholds, conservative, label='Threshold on dominant / all cells', linestyle='--')
     ax.set(xlabel='Threshold', ylabel='All-cell coverage by passing groups', ylim=(0, 1.02), xlim=(0, 1))
-    ax.legend()
+    if incomplete:
+        ax.legend()
     save(fig, 'purity_coverage')
 
-    fig, axes = plt.subplots(1, 2, figsize=(11, 4))
-    axes[0].hist(np.log10(frame.n_cells), bins=35, color='#4477AA')
-    axes[0].set(xlabel='log10(cells per microcell)', ylabel='Microcells', title='Group size distribution')
-    counts = [frame.known_cells.sum(), frame.unknown_cells.sum(), frame.unmatched_cells.sum()]
-    axes[1].bar(['Known', 'Unknown', 'Unmatched'], np.asarray(counts)/total, color=['#228833', '#CCBB44', '#CC6677'])
-    axes[1].set(ylabel='Fraction of all cells', ylim=(0, 1), title='Annotation coverage')
+    fig, axes = plt.subplots(1, 2 if incomplete else 1, figsize=(11, 4) if incomplete else (7, 4), squeeze=False)
+    size_ax = axes[0, 0]
+    size_ax.hist(np.log10(frame.n_cells), bins=35, color='#4477AA')
+    size_ax.set(xlabel=f'log10(cells per {unit})', ylabel=unit.capitalize()+'s', title='Group size distribution')
+    if incomplete:
+        counts = [frame.known_cells.sum(), frame.unknown_cells.sum(), frame.unmatched_cells.sum()]
+        axes[0, 1].bar(['Known', 'Unknown', 'Unmatched'], np.asarray(counts)/total, color=['#228833', '#CCBB44', '#CC6677'])
+        axes[0, 1].set(ylabel='Fraction of all cells', ylim=(0, 1), title='Annotation coverage')
+    # Keep the filename stable so --overwrite also replaces older two-panel figures.
     save(fig, 'size_and_annotations')
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+def main(kind='microcell'):
+    if kind not in ('microcell', 'node'):
+        raise ValueError('kind must be microcell or node')
+    is_node = kind == 'node'
+    id_column = 'node_id' if is_node else 'microcell_id'
+    table_name = 'nodes.parquet' if is_node else 'microcells.parquet'
+    composition_name = 'node_celltype_composition.parquet' if is_node else 'microcell_celltype_composition.parquet'
+    count_column = 'n_nodes' if is_node else 'n_microcells'
+    unit = 'landmark node' if is_node else 'microcell'
+    parser = argparse.ArgumentParser(description=f'Post-hoc {unit} purity evaluation and plots.')
     parser.add_argument('--input-dir', type=Path, required=True)
     parser.add_argument('--output-dir', type=Path, default=None)
-    parser.add_argument('--unknown-labels', nargs='+', default=['Unknown', 'Unassigned'], help='Case-insensitive labels excluded from primary purity. Blank labels are always excluded.')
+    parser.add_argument('--unknown-labels', nargs='+', default=['Unknown', 'Unkown', 'Unassigned'], help='Case-insensitive labels excluded from primary purity. Blank labels are always excluded.')
     parser.add_argument('--small-size', type=int, default=50)
     parser.add_argument('--dpi', type=int, default=180)
     parser.add_argument('--overwrite', action='store_true')
@@ -168,22 +185,32 @@ def main():
         parser.error('output-dir must differ from input-dir')
     if output.exists() and any(output.iterdir()) and not args.overwrite:
         parser.error('output directory is nonempty; choose another or use --overwrite')
-    frame = evaluate(pd.read_parquet(args.input_dir / 'microcells.parquet'),
-                     pd.read_parquet(args.input_dir / 'microcell_celltype_composition.parquet'), args.unknown_labels)
+    objects = pd.read_parquet(args.input_dir / table_name)
+    composition = pd.read_parquet(args.input_dir / composition_name)
+    if id_column not in objects or id_column not in composition:
+        raise ValueError(f'{table_name} and {composition_name} must contain {id_column}')
+    # Adapt IDs internally; exported node tables always retain node_id.
+    frame = evaluate(objects.rename(columns={id_column: 'microcell_id'}),
+                     composition.rename(columns={id_column: 'microcell_id'}), args.unknown_labels)
     report = summary(frame, args.small_size)
+    report['annotation_complete'] = report['unknown_cells'] == 0 and report['unmatched_cells'] == 0
     report.update(input_dir=str(args.input_dir.resolve()), unknown_labels=args.unknown_labels,
                   purity_definition='dominant known celltype count / known annotated cells',
-                  coverage_definition='all cells belonging to passing microcells / all cells in microcells table',
-                  evaluation_scope='All microcells in input table, including any excluded from landmark allocation')
+                  object_type=kind,
+                  coverage_definition=f'all cells belonging to passing {unit}s / all cells in {table_name}',
+                  evaluation_scope=('Included landmark nodes only; cells excluded from landmark allocation are outside the denominator'
+                                    if is_node else 'All microcells in input table, including any excluded from landmark allocation'))
+    renames = {'n_microcells': 'n_nodes', 'evaluable_microcells': 'evaluable_nodes'} if is_node else {}
+    report = {renames.get(key, key): value for key, value in report.items()}
     output.mkdir(parents=True, exist_ok=True)
-    frame.to_csv(output / 'per_microcell.csv', index=False)
+    frame.rename(columns={'microcell_id': id_column}).to_csv(output / f'per_{kind}.csv', index=False)
     by_lineage = grouped_summary(frame, 'lineage', args.small_size)
-    by_lineage.to_csv(output / 'by_lineage.csv', index=False)
-    grouped_summary(frame, 'dominant_known_celltype', args.small_size).to_csv(output / 'by_dominant_celltype.csv', index=False)
+    by_lineage.rename(columns=renames).to_csv(output / 'by_lineage.csv', index=False)
+    grouped_summary(frame, 'dominant_known_celltype', args.small_size).rename(columns=renames).to_csv(output / 'by_dominant_celltype.csv', index=False)
     # These type groups describe dominant labels, not per-celltype recall.
     (output / 'summary.json').write_text(json.dumps(report, indent=2, ensure_ascii=False, allow_nan=False)+'\n')
-    plots(frame, by_lineage, output, args.dpi)
-    for name in ('n_microcells', 'n_cells', 'known_fraction', 'mean_purity', 'median_purity',
+    plots(frame, by_lineage, output, args.dpi, unit=unit)
+    for name in (count_column, 'n_cells', 'known_fraction', 'mean_purity', 'median_purity',
                  'known_cell_weighted_purity', 'dominant_fraction_all_cells', 'median_group_size', 'singleton_fraction'):
         print(f'{name}: {report[name]}')
     print(f'Results: {output.resolve()}')
