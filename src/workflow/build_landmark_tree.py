@@ -435,6 +435,8 @@ def main() -> None:
     )
 
     summary = {
+        "stage_column": args.stage_column,
+        "stage_sources": sorted(nodes["stage_source"].astype(str).unique().tolist()) if "stage_source" in nodes else ["unspecified"],
         "n_nodes": len(nodes),
         "n_edges": len(edges),
         "root_node_id": root,
