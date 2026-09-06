@@ -533,3 +533,7 @@ def main() -> None:
     except Exception:
         log(f"failed; partial outputs kept: {temporary}")
         raise
+
+
+if __name__ == "__main__":
+    main()

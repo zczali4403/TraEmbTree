@@ -212,4 +212,6 @@ def main():
         if out.exists(): shutil.rmtree(out)
         tmp.rename(out); log(f"done: {out}")
     except Exception:
-        log(f"failed; partial output kept at {tmp}"); r
+        log(f"failed; partial output kept at {tmp}"); raise
+
+if __name__ == "__main__": main()
