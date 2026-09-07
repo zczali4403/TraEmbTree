@@ -23,9 +23,12 @@ import pandas as pd
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument("--input-dir", type=Path, required=True,
-                        help="Directory containing nodes.parquet and node_embeddings.npy.")
+    parser.add_argument("--input-dir", type=Path, default=None,
+                        help="Directory containing nodes.parquet and node_embeddings.npy; required unless --plots-only.")
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument(
+        "--plots-only", action="store_true",
+        help="Redraw plots from tables already in output-dir without rebuilding the graph or tree.")
     parser.add_argument(
         "--microcell-dir", type=Path, default=None,
         help="Directory with microcell_umap_coordinates.parquet. By default it is read from the Leiden run_config.json.")
@@ -579,36 +582,38 @@ def plot_outputs(nodes, edges, candidate_edges, output, dpi):
         plt.close(fig)
 
     lookup = nodes.set_index("node_id")
-    fig, ax = plt.subplots(figsize=(24, 11))
+    lineage_centers = np.arange(len(lineages), dtype=float) + 0.5
+    fig, ax = plt.subplots(figsize=(17, 13))
     for edge in edges.itertuples(index=False):
-        ax.plot([lookup.at[edge.parent_id, "tree_x"], lookup.at[edge.child_id, "tree_x"]],
-                [lookup.at[edge.parent_id, "tree_y"], lookup.at[edge.child_id, "tree_y"]],
+        ax.plot([lookup.at[edge.parent_id, "tree_y"], lookup.at[edge.child_id, "tree_y"]],
+                [lookup.at[edge.parent_id, "tree_x"], lookup.at[edge.child_id, "tree_x"]],
                 color="#999999", linewidth=.35, alpha=.55, zorder=1)
     for lineage in lineages:
         mask = real & nodes.lineage.eq(lineage)
-        ax.scatter(nodes.loc[mask, "tree_x"], nodes.loc[mask, "tree_y"], s=7,
-                   color=palette[lineage], linewidths=0, label=lineage, zorder=2)
+        ax.scatter(nodes.loc[mask, "tree_y"], nodes.loc[mask, "tree_x"], s=7,
+                   color=palette[lineage], linewidths=0, zorder=2)
     virtual = ~real
-    ax.scatter(nodes.loc[virtual, "tree_x"], nodes.loc[virtual, "tree_y"], marker="*",
+    ax.scatter(nodes.loc[virtual, "tree_y"], nodes.loc[virtual, "tree_x"], marker="*",
                s=55, color="black", zorder=3)
-    ax.set(xlabel="Lineage-separated branch layout", ylabel="Predicted stage",
-           title="Markov node tree — lineage (early to late, top to bottom)")
-    ax.invert_yaxis()
-    ax.legend(loc="center left", bbox_to_anchor=(1, .5), fontsize=8, markerscale=2)
+    ax.set(xlabel="Predicted stage", ylabel="Lineage-separated branch layout",
+           title="Markov node tree — lineage (early to late, left to right)")
+    ax.set_yticks(lineage_centers, lineages, fontsize=8)
+    ax.grid(axis="x", color="#EEEEEE", linewidth=.5)
     save(fig, "tree_by_lineage")
 
-    fig, ax = plt.subplots(figsize=(24, 11))
+    fig, ax = plt.subplots(figsize=(17, 13))
     for edge in edges.itertuples(index=False):
-        ax.plot([lookup.at[edge.parent_id, "tree_x"], lookup.at[edge.child_id, "tree_x"]],
-                [lookup.at[edge.parent_id, "tree_y"], lookup.at[edge.child_id, "tree_y"]],
+        ax.plot([lookup.at[edge.parent_id, "tree_y"], lookup.at[edge.child_id, "tree_y"]],
+                [lookup.at[edge.parent_id, "tree_x"], lookup.at[edge.child_id, "tree_x"]],
                 color="#AAAAAA", linewidth=.3, alpha=.45, zorder=1)
-    points = ax.scatter(nodes.loc[real, "tree_x"], nodes.loc[real, "tree_y"],
+    points = ax.scatter(nodes.loc[real, "tree_y"], nodes.loc[real, "tree_x"],
                         c=nodes.loc[real, "tree_stage"], cmap="viridis", s=7,
                         linewidths=0, zorder=2)
     fig.colorbar(points, ax=ax, label="Predicted stage")
-    ax.set(xlabel="Lineage-separated branch layout", ylabel="Predicted stage",
-           title="Markov node tree — predicted stage (early to late, top to bottom)")
-    ax.invert_yaxis()
+    ax.set(xlabel="Predicted stage", ylabel="Lineage-separated branch layout",
+           title="Markov node tree — predicted stage (early to late, left to right)")
+    ax.set_yticks(lineage_centers, lineages, fontsize=8)
+    ax.grid(axis="x", color="#EEEEEE", linewidth=.5)
     save(fig, "tree_by_stage")
 
     if "dominant_celltype" in nodes:
@@ -617,23 +622,25 @@ def plot_outputs(nodes, edges, candidate_edges, output, dpi):
                    .groupby("_label", sort=False).n_cells.sum().sort_values(ascending=False))
         celltypes = weights.index.tolist()
         colors = dict(zip(celltypes, discrete_colors(len(celltypes))))
-        legend_columns = max(1, math.ceil(len(celltypes) / 35))
-        fig, ax = plt.subplots(figsize=(24 + 3 * legend_columns, 11))
+        legend_columns = min(8, max(1, len(celltypes)))
+        fig, ax = plt.subplots(figsize=(18, 14))
         for edge in edges.itertuples(index=False):
-            ax.plot([lookup.at[edge.parent_id, "tree_x"], lookup.at[edge.child_id, "tree_x"]],
-                    [lookup.at[edge.parent_id, "tree_y"], lookup.at[edge.child_id, "tree_y"]],
+            ax.plot([lookup.at[edge.parent_id, "tree_y"], lookup.at[edge.child_id, "tree_y"]],
+                    [lookup.at[edge.parent_id, "tree_x"], lookup.at[edge.child_id, "tree_x"]],
                     color="#BBBBBB", linewidth=.3, alpha=.4, zorder=1)
         color_values = [colors[label] for label in labels]
-        ax.scatter(nodes.loc[real, "tree_x"], nodes.loc[real, "tree_y"],
+        ax.scatter(nodes.loc[real, "tree_y"], nodes.loc[real, "tree_x"],
                    c=color_values, s=7, linewidths=0, zorder=2)
         handles = [Line2D([0], [0], marker="o", linestyle="", color=colors[label], label=label)
                    for label in celltypes]
-        ax.legend(handles=handles, loc="center left", bbox_to_anchor=(1, .5),
-                  fontsize=7, ncol=legend_columns, markerscale=1.5,
-                  columnspacing=1.0, handletextpad=.35)
-        ax.set(xlabel="Lineage-separated branch layout", ylabel="Predicted stage",
-               title=f"Markov node tree — all {len(celltypes)} dominant cell types (evaluation only)")
-        ax.invert_yaxis()
+        ax.legend(handles=handles, loc="upper center", bbox_to_anchor=(0.5, -0.08),
+                  fontsize=6, ncol=legend_columns, markerscale=1.35,
+                  columnspacing=.8, handletextpad=.3)
+        ax.set(xlabel="Predicted stage", ylabel="Lineage-separated branch layout",
+               title=f"Markov node tree — all {len(celltypes)} dominant cell types "
+                     "(early to late, left to right; evaluation only)")
+        ax.set_yticks(lineage_centers, lineages, fontsize=8)
+        ax.grid(axis="x", color="#EEEEEE", linewidth=.5)
         save(fig, "tree_by_dominant_celltype")
 
         pd.DataFrame({
@@ -643,7 +650,7 @@ def plot_outputs(nodes, edges, candidate_edges, output, dpi):
         }).to_csv(output / "celltype_colors.csv", index=False)
 
         lineage_output = output / "trees_by_lineage_celltype"
-        lineage_output.mkdir()
+        lineage_output.mkdir(exist_ok=True)
         for position, lineage in enumerate(lineages, 1):
             local_mask = real & nodes.lineage.eq(lineage)
             local_labels = nodes.loc[local_mask, "dominant_celltype"].fillna("Unknown").astype(str)
@@ -727,7 +734,21 @@ def main(argv=None):
         raise ValueError("--distance-temperature must be zero or positive and finite")
     if not 0 <= args.fate_probability_threshold <= 1:
         raise ValueError("--fate-probability-threshold must lie in [0, 1]")
-    root, output = args.input_dir.resolve(), args.output_dir.resolve()
+    output = args.output_dir.resolve()
+    if args.plots_only:
+        if not output.is_dir():
+            raise FileNotFoundError(f"Existing tree output directory not found: {output}")
+        log(f"redrawing plots from existing tree tables in {output}")
+        plot_outputs(
+            pd.read_parquet(output / "tree_nodes.parquet"),
+            pd.read_parquet(output / "tree_edges.parquet"),
+            pd.read_parquet(output / "candidate_markov_edges.parquet"),
+            output, args.dpi)
+        log(f"plots updated: {output}")
+        return
+    if args.input_dir is None:
+        raise ValueError("--input-dir is required unless --plots-only is used")
+    root = args.input_dir.resolve()
     if output.exists():
         raise FileExistsError(f"Output path already exists: {output}")
     temporary = output.with_name(output.name + ".tmp")
