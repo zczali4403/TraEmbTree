@@ -40,12 +40,7 @@ def parse_args(argv=None):
         default=Path("/mnt/input/sc_cz/Concord/eval/2026_09_03/predicted_stage.csv"))
     parser.add_argument(
         "--metadata", type=Path,
-        default=Path("/mnt/input/sc_cz/Concord/data/all_lineage_260829.csv"))
-    parser.add_argument(
-        "--reannotation", type=Path,
-        default=Path("/mnt/input/sc_cz/Concord/eval/2026_07_22/eval_liver/10-Liver_celltype_reanno.csv"),
-        help="Optional cell-level reannotation overlaid on the base metadata.")
-    parser.add_argument("--no-reannotation", action="store_true")
+        default=Path("/mnt/input/sc_cz/Concord/data/all_lineage_260829_liver_reanno.csv"))
     parser.add_argument("--output-dir", type=Path, default=None)
     parser.add_argument("--cells-per-node", type=int, default=150)
     parser.add_argument(
@@ -59,8 +54,6 @@ def parse_args(argv=None):
     parser.add_argument("--dpi", type=int, default=220)
     parser.add_argument("--metadata-cell-column", default="cell")
     parser.add_argument("--metadata-celltype-column", default="celltype")
-    parser.add_argument("--reannotation-cell-column", default="cell_name")
-    parser.add_argument("--reannotation-celltype-column", default="celltype_new")
     return parser.parse_args(argv)
 
 
@@ -231,22 +224,6 @@ def attach_celltypes(sample, args):
         examples = result.loc[missing, "cell_id"].head(10).tolist()
         raise ValueError(f"{missing.sum():,} sampled cells lack base cell type: {examples}")
     result["celltype"] = result.celltype.astype(str)
-
-    if not args.no_reannotation and args.reannotation is not None:
-        reanno = pd.read_csv(
-            args.reannotation,
-            usecols=[args.reannotation_cell_column, args.reannotation_celltype_column],
-            dtype={args.reannotation_cell_column: str}, keep_default_na=False)
-        reanno = reanno[[args.reannotation_cell_column, args.reannotation_celltype_column]]
-        reanno.columns = ["cell_id", "reannotated_celltype"]
-        reanno["cell_id"] = reanno.cell_id.astype(str)
-        if reanno.cell_id.duplicated().any():
-            raise ValueError("Reannotation has duplicate cell IDs")
-        result = result.merge(reanno, on="cell_id", how="left", validate="one_to_one")
-        changed = result.reannotated_celltype.notna()
-        result.loc[changed, "celltype"] = result.loc[changed, "reannotated_celltype"].astype(str)
-        result.drop(columns="reannotated_celltype", inplace=True)
-        log(f"applied updated cell type to {changed.sum():,} sampled cells")
     return result
 
 

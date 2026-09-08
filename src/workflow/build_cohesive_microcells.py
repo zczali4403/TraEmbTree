@@ -22,7 +22,7 @@ def args_parser():
     p=argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     p.add_argument('--embeddings',type=Path,default=Path('/mnt/input/sc_cz/Concord/eval/2026_09_03/embeddings.npy'))
     p.add_argument('--csr-dir',type=Path,default=Path('/scratch/amlt_code/traemb_csr_0829'))
-    p.add_argument('--metadata',type=Path,default=Path('/mnt/input/sc_cz/Concord/data/all_lineage_260829.csv'))
+    p.add_argument('--metadata',type=Path,default=Path('/mnt/input/sc_cz/Concord/data/all_lineage_260829_liver_reanno.csv'))
     p.add_argument('--output-dir',type=Path,default=HERE/'stagebin_microcells')
     p.add_argument('--predicted-stage',type=Path,default=None,help='CSV with idx, cell_id, predicted_stage; replaces original stage for binning and all stage summaries.')
     p.add_argument('--stage-bin-width',type=float,default=1.0,help='Width of fixed stage bins.')

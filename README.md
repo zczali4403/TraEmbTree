@@ -6,9 +6,8 @@ This repository contains the retained workflow for constructing a developmental 
 
 - Cell embeddings: `/mnt/input/sc_cz/Concord/eval/2026_09_03/embeddings.npy`
 - Predicted developmental stage: `/mnt/input/sc_cz/Concord/eval/2026_09_03/predicted_stage.csv`
-- Cell metadata: `/mnt/input/sc_cz/Concord/data/all_lineage_260829.csv`
+- Cell metadata: `/mnt/input/sc_cz/Concord/data/all_lineage_260829_liver_reanno.csv`
 - CSR cell index directory: `/scratch/amlt_code/traemb_csr_0829`
-- Liver reannotation: `/mnt/input/sc_cz/Concord/eval/2026_07_22/eval_liver/10-Liver_celltype_reanno.csv`
 
 `predicted_stage.csv` must contain `idx`, `cell_id`, and `predicted_stage`. The loader verifies both the embedding/CSR row index and cell ID before using a prediction.
 
@@ -37,7 +36,7 @@ Cells are first separated by lineage and fixed-width predicted-stage bins. Withi
 python src/workflow/build_cohesive_microcells.py \
   --embeddings /mnt/input/sc_cz/Concord/eval/2026_09_03/embeddings.npy \
   --csr-dir /scratch/amlt_code/traemb_csr_0829 \
-  --metadata /mnt/input/sc_cz/Concord/data/all_lineage_260829.csv \
+  --metadata /mnt/input/sc_cz/Concord/data/all_lineage_260829_liver_reanno.csv \
   --predicted-stage /mnt/input/sc_cz/Concord/eval/2026_09_03/predicted_stage.csv \
   --output-dir microcells_0903_predicted_stage \
   --stage-bin-width 2 \
@@ -73,21 +72,7 @@ python src/workflow/discover_leiden_trajectory_nodes.py \
 
 Current result: 297 Leiden states and 3,141 temporal nodes.
 
-### 3. Apply the Liver cell-type reannotation
-
-This step changes annotation summaries only. It does not change metacell assignments, Leiden assignments, node IDs, or graph structure. Run it before building the tree so subsequent outputs inherit the refreshed labels.
-
-```bash
-python src/utilities/refresh_celltype_annotations.py \
-  --metadata /mnt/input/sc_cz/Concord/data/all_lineage_260829.csv \
-  --reannotation /mnt/input/sc_cz/Concord/eval/2026_07_22/eval_liver/10-Liver_celltype_reanno.csv \
-  --lineage Liver \
-  --csr-dir /scratch/amlt_code/traemb_csr_0829 \
-  --microcell-dir microcells_0903_predicted_stage \
-  --node-dir leiden_nodes_0903_by_lineage_r05_stage2
-```
-
-### 4. Build the lineage-aware Markov node tree
+### 3. Build the lineage-aware Markov node tree
 
 For each lineage, an exact cosine kNN graph is built from the 3,141 node embeddings. Predicted stage orients every real edge from earlier to later. Embedding distance determines edge weight; cell type is excluded. Markov transition probabilities and terminal fate probabilities are calculated before extracting one rooted tree.
 
@@ -104,7 +89,7 @@ python src/workflow/build_markov_node_tree.py \
 
 Current result: 19,178 candidate edges, 3,141 temporal nodes, and one tree containing all 19 lineage subtrees.
 
-### 5. Contract redundant nodes after tree construction
+### 4. Contract redundant nodes after tree construction
 
 Only consecutive degree-two nodes on nonbranching paths can merge. Lineage roots, branch points, and terminal nodes are fixed anchors. A candidate node joins the current group only when its cosine distance to the weighted group center is at most 0.08 and the resulting cell-level stage span is at most 6. Cell type is aggregated after contraction and never affects merging.
 
@@ -161,8 +146,7 @@ python src/visualization/plot_markov_tree_sampled_cells.py \
   --node-dir leiden_nodes_0903_by_lineage_r05_stage2 \
   --microcell-dir microcells_0903_predicted_stage \
   --predicted-stage /mnt/input/sc_cz/Concord/eval/2026_09_03/predicted_stage.csv \
-  --metadata /mnt/input/sc_cz/Concord/data/all_lineage_260829.csv \
-  --reannotation /mnt/input/sc_cz/Concord/eval/2026_07_22/eval_liver/10-Liver_celltype_reanno.csv \
+  --metadata /mnt/input/sc_cz/Concord/data/all_lineage_260829_liver_reanno.csv \
   --cells-per-node 150 \
   --seed 42 \
   --dpi 220
@@ -181,7 +165,6 @@ src/workflow/build_markov_node_tree.py
 src/workflow/contract_markov_tree_nodes.py
 src/utilities/evaluate_microcell_purity.py
 src/utilities/evaluate_node_purity.py
-src/utilities/refresh_celltype_annotations.py
 src/visualization/plot_microcell_umap_scanpy.py
 src/visualization/plot_markov_tree_sampled_cells.py
 ```
