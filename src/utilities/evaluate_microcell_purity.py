@@ -185,7 +185,18 @@ def main(kind='microcell'):
         parser.error('output-dir must differ from input-dir')
     if output.exists() and any(output.iterdir()) and not args.overwrite:
         parser.error('output directory is nonempty; choose another or use --overwrite')
-    objects = pd.read_parquet(args.input_dir / table_name)
+    table_path = args.input_dir / table_name
+    if is_node and not table_path.exists():
+        contracted_path = args.input_dir / "tree_nodes.parquet"
+        if contracted_path.exists():
+            table_path = contracted_path
+            table_name = contracted_path.name
+        else:
+            raise FileNotFoundError(
+                f"Neither nodes.parquet nor tree_nodes.parquet exists in {args.input_dir}")
+    objects = pd.read_parquet(table_path)
+    if is_node and "node_type" in objects:
+        objects = objects[objects.node_type.eq("temporal_node")].copy()
     composition = pd.read_parquet(args.input_dir / composition_name)
     if id_column not in objects or id_column not in composition:
         raise ValueError(f'{table_name} and {composition_name} must contain {id_column}')
