@@ -169,7 +169,7 @@ def main(kind='microcell'):
     table_name = 'nodes.parquet' if is_node else 'microcells.parquet'
     composition_name = 'node_celltype_composition.parquet' if is_node else 'microcell_celltype_composition.parquet'
     count_column = 'n_nodes' if is_node else 'n_microcells'
-    unit = 'landmark node' if is_node else 'microcell'
+    unit = 'trajectory node' if is_node else 'microcell'
     parser = argparse.ArgumentParser(description=f'Post-hoc {unit} purity evaluation and plots.')
     parser.add_argument('--input-dir', type=Path, required=True)
     parser.add_argument('--output-dir', type=Path, default=None)
@@ -198,8 +198,8 @@ def main(kind='microcell'):
                   purity_definition='dominant known celltype count / known annotated cells',
                   object_type=kind,
                   coverage_definition=f'all cells belonging to passing {unit}s / all cells in {table_name}',
-                  evaluation_scope=('Included landmark nodes only; cells excluded from landmark allocation are outside the denominator'
-                                    if is_node else 'All microcells in input table, including any excluded from landmark allocation'))
+                  evaluation_scope=('All trajectory nodes in nodes.parquet'
+                                    if is_node else 'All microcells in microcells.parquet'))
     renames = {'n_microcells': 'n_nodes', 'evaluable_microcells': 'evaluable_nodes'} if is_node else {}
     report = {renames.get(key, key): value for key, value in report.items()}
     output.mkdir(parents=True, exist_ok=True)

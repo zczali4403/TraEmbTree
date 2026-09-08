@@ -22,4 +22,7 @@ landmark_tree*/
 # Interrupted atomic-build directories
 .*.building-*/
 
-metacell2_stagebin_results/
+# Retained workflow outputs (local, never committed)
+microcells_*/
+leiden_nodes_*/
+markov_tree_*/
