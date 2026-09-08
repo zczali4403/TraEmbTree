@@ -448,7 +448,7 @@ def plot_outputs(nodes, edges, output, source_tree_dir, dpi):
     save(fig, "tree_by_dominant_celltype")
 
     lineage_output = output / "trees_by_lineage_celltype"
-    lineage_output.mkdir()
+    lineage_output.mkdir(exist_ok=True)
     for position, lineage in enumerate(lineages, 1):
         mask = real & nodes.lineage.eq(lineage)
         local_labels = nodes.loc[mask, "dominant_celltype"].astype(str)
@@ -456,12 +456,18 @@ def plot_outputs(nodes, edges, output, source_tree_dir, dpi):
         legend_columns = max(1, math.ceil(len(local_types) / 30))
         fig, ax = plt.subplots(figsize=(12 + 3 * legend_columns, 8))
         local_edges = edges[edges.lineage.eq(lineage) & edges.edge_kind.ne("global_root")]
-        draw_edges(ax, local_edges)
-        ax.scatter(nodes.loc[mask, "tree_stage"], nodes.loc[mask, "tree_x"],
+        for edge in local_edges.itertuples(index=False):
+            ax.plot(
+                [lookup.at[edge.parent_id, "tree_x"],
+                 lookup.at[edge.child_id, "tree_x"]],
+                [lookup.at[edge.parent_id, "tree_stage"],
+                 lookup.at[edge.child_id, "tree_stage"]],
+                color="#999999", linewidth=.55, alpha=.6, zorder=1)
+        ax.scatter(nodes.loc[mask, "tree_x"], nodes.loc[mask, "tree_stage"],
                    c=[colors[label] for label in local_labels], s=16,
                    linewidths=0, zorder=2)
         root = nodes[nodes.node_type.eq("lineage_root") & nodes.lineage.eq(lineage)]
-        ax.scatter(root.tree_stage, root.tree_x, marker="*", s=80,
+        ax.scatter(root.tree_x, root.tree_stage, marker="*", s=80,
                    color="black", zorder=3)
         handles = [Line2D([0], [0], marker="o", linestyle="", color=colors[label], label=label)
                    for label in local_types]
@@ -470,9 +476,10 @@ def plot_outputs(nodes, edges, output, source_tree_dir, dpi):
         ax.legend(handles=handles, loc="center left", bbox_to_anchor=(1, .5),
                   fontsize=8, ncol=legend_columns, markerscale=1.25,
                   columnspacing=1, handletextpad=.35)
-        ax.set(xlabel="Cell-weighted predicted stage", ylabel="Branch layout",
+        ax.set(xlabel="Branch layout", ylabel="Cell-weighted predicted stage",
                title=f"{lineage} — {mask.sum()} contracted nodes")
-        ax.grid(axis="x", color="#EEEEEE", linewidth=.5)
+        ax.invert_yaxis()
+        ax.grid(axis="y", color="#EEEEEE", linewidth=.5)
         safe = re.sub(r"[^A-Za-z0-9]+", "_", lineage).strip("_").lower()
         stem = lineage_output / f"{position:02d}_{safe}"
         fig.savefig(stem.with_suffix(".png"), dpi=dpi, bbox_inches="tight")
