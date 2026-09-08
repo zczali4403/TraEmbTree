@@ -493,8 +493,13 @@ def attach_display_umap(tree_nodes, leiden_root, microcell_dir):
         raise ValueError("Some assigned metacells have no saved UMAP coordinates")
     real_count = int(tree_nodes.node_type.eq("temporal_node").sum())
     labels = merged.node_id.to_numpy(dtype=np.int64)
-    if labels.min() < 0 or labels.max() >= real_count:
+    if labels.max() >= real_count or labels.min() < -1:
         raise ValueError("microcell_node_assignments.parquet contains invalid node_id")
+    retained = labels >= 0
+    if not retained.any():
+        raise ValueError("No metacells pass the temporal-node support filter")
+    labels = labels[retained]
+    merged = merged.loc[retained].reset_index(drop=True)
     weights = merged.n_cells.to_numpy(dtype=np.float64)
     totals = np.bincount(labels, weights=weights, minlength=real_count)
     if np.any(totals <= 0):

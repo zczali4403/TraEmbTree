@@ -92,14 +92,16 @@ def load_tree_and_mapping(args):
     real_ids = real.node_id.to_numpy(dtype=np.int64)
     if not np.array_equal(np.sort(real_ids), np.arange(len(real))):
         raise ValueError("Temporal node IDs must be contiguous from zero")
-    if assignment.microcell_id.duplicated().any():
-        raise ValueError("microcell_node_assignments.parquet has duplicate microcell IDs")
+    microcell_ids = assignment.microcell_id.to_numpy(dtype=np.int64)
+    if (assignment.microcell_id.duplicated().any() or
+            not np.array_equal(np.sort(microcell_ids), np.arange(len(assignment)))):
+        raise ValueError("microcell_id must be unique and contiguous from zero")
+    assignment_nodes = assignment.node_id.to_numpy(dtype=np.int64)
+    if assignment_nodes.min() < -1 or assignment_nodes.max() >= len(real):
+        raise ValueError("Assignment node_id must be -1 or a valid temporal node")
     maximum = int(assignment.microcell_id.max())
     microcell_to_node = np.full(maximum + 1, -1, dtype=np.int32)
-    microcell_to_node[assignment.microcell_id.to_numpy(dtype=np.int64)] = (
-        assignment.node_id.to_numpy(dtype=np.int32))
-    if (microcell_to_node < 0).any():
-        raise ValueError("microcell_id must be contiguous and fully assigned")
+    microcell_to_node[microcell_ids] = assignment_nodes.astype(np.int32)
     return nodes, edges, real, microcell_to_node
 
 
@@ -120,6 +122,7 @@ def sample_cell_indices(cell_to_microcell_path, microcell_to_node, real_nodes,
             microcells = np.asarray(cell_to_microcell[start:stop], dtype=np.int64)
             valid = (microcells >= 0) & (microcells < len(microcell_to_node))
             mapped = microcell_to_node[microcells[valid]]
+            mapped = mapped[(mapped >= 0) & (mapped < node_count)]
             expected += np.bincount(mapped, minlength=node_count)
     if (expected <= 0).any():
         raise ValueError("At least one temporal node has no underlying cells")

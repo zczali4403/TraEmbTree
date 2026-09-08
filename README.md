@@ -56,7 +56,7 @@ Current result: 15,203,034 cells in 816,475 metacells.
 
 ### 2. Discover lineage-local trajectory nodes
 
-Cosine kNN and Leiden clustering are computed independently inside each of the 19 known lineages using metacell embeddings only. Each Leiden state is then subdivided by predicted-stage bins of width 2.
+Cosine kNN and Leiden clustering are computed independently inside each of the 19 known lineages using metacell embeddings only. Each Leiden state is then subdivided by predicted-stage bins of width 2. Temporal nodes with fewer than `--min-node-cells` cells are excluded from downstream node outputs without using cell type. Their original IDs and assignments remain in audit columns and tables.
 
 ```bash
 python src/workflow/discover_leiden_trajectory_nodes.py \
@@ -66,11 +66,12 @@ python src/workflow/discover_leiden_trajectory_nodes.py \
   --leiden-resolution 0.5 \
   --leiden-iterations 2 \
   --stage-bin-width 2 \
+  --min-node-cells 50 \
   --threads 32 \
   --seed 42
 ```
 
-Current result: 297 Leiden states and 3,141 temporal nodes.
+The output includes `filtered_small_nodes.parquet`; excluded metacells retain `raw_node_id` and receive `node_id=-1`. Retained nodes are renumbered contiguously for all downstream scripts. `summary.json` reports both raw and retained node counts and the excluded cell fraction.
 
 ### 3. Build the lineage-aware Markov node tree
 

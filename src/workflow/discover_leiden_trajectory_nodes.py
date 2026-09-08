@@ -26,6 +26,9 @@ def parse_args(argv=None):
     parser.add_argument("--leiden-resolution", type=float, default=0.5)
     parser.add_argument("--leiden-iterations", type=int, default=2)
     parser.add_argument("--stage-bin-width", type=float, default=2.0)
+    parser.add_argument(
+        "--min-node-cells", type=int, default=50,
+        help="Exclude temporal nodes with fewer cells from final node outputs and downstream trees.")
     parser.add_argument("--threads", type=int, default=16)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--plot-max-points", type=int, default=400_000)
@@ -222,6 +225,54 @@ def group_centroids(embedding, labels, n_groups):
     return (sums / np.maximum(norms[:, None], 1e-12)).astype(np.float32)
 
 
+def filter_temporal_nodes(assignment, nodes, node_comp, node_embeddings,
+                          min_node_cells):
+    """Filter low-support nodes while retaining complete audit information."""
+    raw_ids = nodes.node_id.to_numpy(dtype=np.int64)
+    if not np.array_equal(raw_ids, np.arange(len(nodes))):
+        raise ValueError("Raw temporal node IDs must be contiguous from zero")
+    keep = nodes.n_cells.to_numpy(dtype=np.int64) >= min_node_cells
+    if not keep.any():
+        raise ValueError(
+            f"--min-node-cells {min_node_cells} removes every temporal node")
+    mapping = np.full(len(nodes), -1, dtype=np.int64)
+    mapping[keep] = np.arange(np.count_nonzero(keep), dtype=np.int64)
+
+    result_assignment = assignment.copy()
+    result_assignment.rename(columns={"node_id": "raw_node_id"}, inplace=True)
+    result_assignment["node_id"] = mapping[
+        result_assignment.raw_node_id.to_numpy(dtype=np.int64)]
+    result_assignment["passes_support_filter"] = result_assignment.node_id.ge(0)
+
+    retained = nodes.loc[keep].copy()
+    retained.rename(columns={"node_id": "raw_node_id"}, inplace=True)
+    retained.insert(0, "node_id", mapping[retained.raw_node_id.to_numpy(dtype=np.int64)])
+    retained["passes_support_filter"] = True
+    retained.reset_index(drop=True, inplace=True)
+
+    filtered = nodes.loc[~keep].copy()
+    filtered.rename(columns={"node_id": "raw_node_id"}, inplace=True)
+    filtered.insert(0, "node_id", -1)
+    filtered["passes_support_filter"] = False
+    filtered["filter_reason"] = "n_cells_below_min_node_cells"
+    filtered.reset_index(drop=True, inplace=True)
+
+    retained_comp = node_comp[node_comp.node_id.isin(raw_ids[keep])].copy()
+    filtered_comp = node_comp[node_comp.node_id.isin(raw_ids[~keep])].copy()
+    for table in (retained_comp, filtered_comp):
+        table.rename(columns={"node_id": "raw_node_id"}, inplace=True)
+        table.insert(0, "node_id", mapping[
+            table.raw_node_id.to_numpy(dtype=np.int64)])
+    retained_comp.sort_values(["node_id", "rank"], inplace=True)
+    retained_comp.reset_index(drop=True, inplace=True)
+    filtered_comp.sort_values(["raw_node_id", "rank"], inplace=True)
+    filtered_comp.reset_index(drop=True, inplace=True)
+
+    retained_embeddings = np.asarray(node_embeddings[keep], dtype=np.float32)
+    return (result_assignment, retained, retained_comp, retained_embeddings,
+            filtered, filtered_comp)
+
+
 def weighted_purity(comp):
     if comp.empty:
         return None
@@ -291,8 +342,10 @@ def plot_outputs(root, output, assignment, states, nodes, max_points, dpi, seed)
 def main(argv=None):
     args = parse_args(argv)
     if (args.knn < 2 or args.leiden_resolution <= 0 or args.leiden_iterations == 0
-            or args.threads < 1 or args.plot_max_points < 1):
-        raise ValueError("Invalid kNN, Leiden, thread, or plotting parameter")
+            or args.threads < 1 or args.plot_max_points < 1
+            or args.min_node_cells < 1):
+        raise ValueError(
+            "Invalid kNN, Leiden, node-support, thread, or plotting parameter")
     root, output = args.input_dir.resolve(), args.output_dir.resolve()
     if output.exists() and any(output.iterdir()):
         raise FileExistsError(f"Output directory is not empty: {output}")
@@ -318,15 +371,25 @@ def main(argv=None):
     nodes["stage_bin_right"] = (nodes.predicted_stage_bin + 1) * args.stage_bin_width
     states, nodes, state_comp, node_comp = attach_exact_celltype_purity(
         root, assignment, states, nodes)
+    raw_node_count = len(nodes)
+    raw_node_purity = weighted_purity(node_comp)
+    raw_node_embeddings = group_centroids(embedding, node_id, raw_node_count)
+    (assignment, nodes, node_comp, node_embeddings,
+     filtered_nodes, filtered_node_comp) = filter_temporal_nodes(
+         assignment, nodes, node_comp, raw_node_embeddings,
+         args.min_node_cells)
+
     assignment.to_parquet(output / "microcell_node_assignments.parquet", index=False)
     states.to_parquet(output / "states.parquet", index=False)
     nodes.to_parquet(output / "nodes.parquet", index=False)
+    filtered_nodes.to_parquet(output / "filtered_small_nodes.parquet", index=False)
     graph_summary.to_csv(output / "lineage_knn_summary.csv", index=False)
     if not state_comp.empty:
         state_comp.to_parquet(output / "state_celltype_composition.parquet", index=False)
         node_comp.to_parquet(output / "node_celltype_composition.parquet", index=False)
-    np.save(output / "node_embeddings.npy",
-            group_centroids(embedding, node_id, len(nodes)))
+        filtered_node_comp.to_parquet(
+            output / "filtered_small_node_celltype_composition.parquet", index=False)
+    np.save(output / "node_embeddings.npy", node_embeddings)
     config = {key: str(value.resolve()) if isinstance(value, Path) else value
               for key, value in vars(args).items()}
     config["inputs"] = {
@@ -337,8 +400,17 @@ def main(argv=None):
     summary = {
         "n_metacells": int(len(metadata)), "n_cells": int(metadata.n_cells.sum()),
         "n_lineages": int(metadata.lineage.nunique()),
-        "n_embedding_states": int(len(states)), "n_temporal_nodes": int(len(nodes)),
+        "n_embedding_states": int(len(states)),
+        "n_raw_temporal_nodes": int(raw_node_count),
+        "n_temporal_nodes": int(len(nodes)),
+        "min_node_cells": int(args.min_node_cells),
+        "n_filtered_small_nodes": int(len(filtered_nodes)),
+        "n_filtered_metacells": int(filtered_nodes.n_metacells.sum()),
+        "n_filtered_cells": int(filtered_nodes.n_cells.sum()),
+        "filtered_cell_fraction": float(
+            filtered_nodes.n_cells.sum() / metadata.n_cells.sum()),
         "state_cell_weighted_celltype_purity": weighted_purity(state_comp),
+        "raw_node_cell_weighted_celltype_purity": raw_node_purity,
         "node_cell_weighted_celltype_purity": weighted_purity(node_comp),
         "median_state_metacells": float(states.n_metacells.median()),
         "median_node_metacells": float(nodes.n_metacells.median()),
@@ -346,6 +418,8 @@ def main(argv=None):
         "max_node_metacells": int(nodes.n_metacells.max()),
         "clustering_inputs": "embedding only, independently within each known lineage",
         "predicted_stage_usage": "post-Leiden temporal subdivision only",
+        "node_support_filter": "n_cells >= min_node_cells; celltype-independent",
+        "filtered_assignment": "node_id=-1 with raw_node_id retained",
         "celltype_usage": "post-clustering evaluation only",
         "node_connections_constructed": False,
     }
