@@ -75,7 +75,7 @@ The output includes `filtered_small_nodes.parquet`; excluded metacells retain `r
 
 ### 3. Build the lineage-aware Markov node tree
 
-For each lineage, an exact cosine kNN graph is built from the 3,141 node embeddings. Predicted stage orients every real edge from earlier to later. Embedding distance determines edge weight; cell type is excluded. Markov transition probabilities and terminal fate probabilities are calculated before extracting one rooted tree.
+For each lineage, an exact cosine kNN graph is built from the node embeddings. Predicted stage orients every real edge from earlier to later. All nodes within `--root-stage-window` of the lineage's earliest retained stage connect directly to its virtual root; incoming real-node edges to this early root set are removed. Embedding distance determines edge weight; cell type is excluded. Markov transition probabilities and terminal fate probabilities are calculated before extracting one rooted tree.
 
 ```bash
 python src/workflow/build_markov_node_tree.py \
@@ -85,6 +85,7 @@ python src/workflow/build_markov_node_tree.py \
   --knn 10 \
   --mutual-knn-bonus 1.5 \
   --stage-column cell_weighted_mean_stage \
+  --root-stage-window 0.5 \
   --dpi 220
 ```
 

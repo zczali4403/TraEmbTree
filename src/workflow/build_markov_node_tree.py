@@ -35,6 +35,10 @@ def parse_args(argv=None):
     parser.add_argument("--knn", type=int, default=10,
                         help="Exact cosine neighbors computed independently per lineage.")
     parser.add_argument("--stage-column", default="cell_weighted_mean_stage")
+    parser.add_argument(
+        "--root-stage-window", type=float, default=0.5,
+        help="Within each lineage, connect every node no more than this many "
+             "stage units after the earliest node directly to the virtual root.")
     parser.add_argument("--mutual-knn-bonus", type=float, default=1.5)
     parser.add_argument(
         "--distance-temperature", type=float, default=0.0,
@@ -106,16 +110,24 @@ def exact_knn_pairs(local_embedding, k):
     return pairs
 
 
-def lineage_candidate_edges(node_ids, embedding, stage, k):
-    """Orient the kNN union by stage and add a fallback parent where required."""
+def lineage_candidate_edges(node_ids, embedding, stage, k, root_stage_window):
+    """Orient kNN edges by stage and keep an early window as virtual-root children."""
     local_embedding = embedding[node_ids]
     pairs = exact_knn_pairs(local_embedding, k)
+    local_stage = stage[node_ids]
+    min_stage = float(local_stage.min())
+    root_ids = node_ids[local_stage <= min_stage + root_stage_window].astype(np.int64)
+    root_set = set(root_ids.tolist())
     rows = []
     for (left_local, right_local), info in pairs.items():
         left, right = int(node_ids[left_local]), int(node_ids[right_local])
         if stage[left] == stage[right]:
             continue
         source, target = (left, right) if stage[left] < stage[right] else (right, left)
+        # Early-window nodes are independent children of the lineage virtual
+        # root, so they must not also receive an incoming real-node edge.
+        if target in root_set:
+            continue
         rows.append({
             "source_id": source,
             "target_id": target,
@@ -128,15 +140,11 @@ def lineage_candidate_edges(node_ids, embedding, stage, k):
     incoming = {int(node): 0 for node in node_ids}
     for row in rows:
         incoming[row["target_id"]] += 1
-    local_stage = stage[node_ids]
-    min_stage = float(local_stage.min())
-    root_ids = node_ids[local_stage == min_stage].astype(np.int64)
-
     # A non-root node without an earlier kNN neighbor gets its nearest earlier
     # node. There is deliberately no maximum stage-gap restriction.
     for target in node_ids[np.argsort(local_stage, kind="stable")]:
         target = int(target)
-        if stage[target] == min_stage or incoming[target] > 0:
+        if target in root_set or incoming[target] > 0:
             continue
         earlier = node_ids[local_stage < stage[target]]
         similarity = embedding[earlier] @ embedding[target]
@@ -153,13 +161,15 @@ def lineage_candidate_edges(node_ids, embedding, stage, k):
     return rows, root_ids
 
 
-def build_candidate_graph(nodes, embedding, stage, k, mutual_bonus, temperature):
+def build_candidate_graph(
+        nodes, embedding, stage, k, mutual_bonus, temperature, root_stage_window):
     rows = []
     lineage_roots = {}
     lineage_temperatures = {}
     for position, (lineage, frame) in enumerate(nodes.groupby("lineage", sort=True), 1):
         ids = frame.node_id.to_numpy(dtype=np.int64)
-        local_rows, roots = lineage_candidate_edges(ids, embedding, stage, k)
+        local_rows, roots = lineage_candidate_edges(
+            ids, embedding, stage, k, root_stage_window)
         distances = np.asarray(
             [np.clip(1.0 - row["cosine_similarity"], 0.0, 2.0) for row in local_rows])
         positive = distances[distances > 1e-8]
@@ -183,7 +193,7 @@ def build_candidate_graph(nodes, embedding, stage, k, mutual_bonus, temperature)
         lineage_roots[str(lineage)] = roots.tolist()
         lineage_temperatures[str(lineage)] = local_temperature
         log(f"[{position}] {lineage}: {len(ids):,} nodes, {len(local_rows):,} candidate edges, "
-            f"{len(roots)} earliest roots, temperature={local_temperature:.5g}")
+            f"{len(roots)} early-window roots, temperature={local_temperature:.5g}")
     edges = pd.DataFrame(rows)
     if edges.empty and len(nodes) > len(lineage_roots):
         raise RuntimeError("No directed candidate edges were constructed")
@@ -737,6 +747,8 @@ def main(argv=None):
         raise ValueError("--mutual-knn-bonus must be positive and finite")
     if args.distance_temperature < 0 or not np.isfinite(args.distance_temperature):
         raise ValueError("--distance-temperature must be zero or positive and finite")
+    if args.root_stage_window < 0 or not np.isfinite(args.root_stage_window):
+        raise ValueError("--root-stage-window must be zero or positive and finite")
     if not 0 <= args.fate_probability_threshold <= 1:
         raise ValueError("--fate-probability-threshold must lie in [0, 1]")
     output = args.output_dir.resolve()
@@ -766,7 +778,7 @@ def main(argv=None):
         log(f"building exact lineage-local cosine kNN graph for {len(nodes):,} nodes")
         candidate, lineage_roots, temperatures = build_candidate_graph(
             nodes, embedding, stage, args.knn, args.mutual_knn_bonus,
-            args.distance_temperature)
+            args.distance_temperature, args.root_stage_window)
         nodes, candidate, fate = markov_quantities(
             nodes, candidate, stage, lineage_roots, args.fate_probability_threshold)
         tree_nodes, tree_edges, candidate, global_root, lineage_virtual_ids = extract_tree(
@@ -801,7 +813,9 @@ def main(argv=None):
             "global_root_id": int(global_root),
             "lineage_virtual_root_ids": lineage_virtual_ids,
             "stage_column": args.stage_column,
-            "stage_usage": "strict edge direction only; no maximum stage gap and no stage weight",
+            "root_stage_window": args.root_stage_window,
+            "root_selection": "all nodes within root_stage_window after each lineage minimum stage",
+            "stage_usage": "strict edge direction plus early-root window; no maximum stage gap and no stage weight",
             "edge_weight": "exp(-cosine_distance / lineage_temperature), with optional mutual-kNN bonus",
             "tree_extraction": "maximum-weight arborescence on the stage-directed DAG",
             "same_state_continuity_edges": False,
