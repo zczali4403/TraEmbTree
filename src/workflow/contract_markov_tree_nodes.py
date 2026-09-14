@@ -2,9 +2,10 @@
 """Contract redundant degree-two nodes after a Markov tree has been built.
 
 Only consecutive temporal nodes on nonbranching paths may be merged. Lineage
-roots, branch points, and terminal nodes remain singleton anchors, preserving
-the rooted branching topology. Merge decisions use node embeddings and stage
-span only; cell-type labels are aggregated afterwards for evaluation and plots.
+roots remain singleton anchors. A degree-two chain may absorb its downstream
+branch point or terminal node while preserving the rooted branching topology.
+Merge decisions use node embeddings and stage span only; cell-type labels are
+aggregated afterwards for evaluation and plots.
 """
 from __future__ import annotations
 
@@ -174,10 +175,20 @@ def make_groups(real_nodes, embeddings, parents, children,
     chains, anchors = eligible_chains(real_nodes, parents, children)
     lookup = real_nodes.set_index("node_id")
     unit = normalize_rows(embeddings)
-    groups = [[node] for node in sorted(anchors)]
+    downstream_anchors = set()
+    groups = []
     for chain in chains:
+        # A maximal degree-two chain may absorb its downstream structural
+        # endpoint. Because real tree nodes have at most one parent, this adds
+        # only degree2 -> branch and degree2 -> terminal contractions. Upstream
+        # roots/branches and anchor -> anchor edges remain protected.
+        downstream = children[chain[-1]][0]
+        if downstream in anchors:
+            chain = [*chain, downstream]
+            downstream_anchors.add(downstream)
         groups.extend(partition_chain(
             chain, lookup, unit, embeddings, max_distance, max_stage_span))
+    groups.extend([node] for node in sorted(anchors - downstream_anchors))
     covered = [node for group in groups for node in group]
     if len(covered) != len(set(covered)) or set(covered) != set(real_nodes.node_id):
         raise RuntimeError("Contracted groups do not partition temporal nodes")
@@ -556,12 +567,18 @@ def main(argv=None):
         np.save(temporary / "node_embeddings.npy", contracted_embeddings)
         group_sizes = np.asarray([len(group) for group in groups])
         stage_spans = contracted_real.max_stage - contracted_real.min_stage
+        merged_anchors = {
+            node for group in groups if len(group) > 1
+            for node in group if node in anchors
+        }
         summary = {
             "n_source_temporal_nodes": int(len(real)),
             "n_contracted_temporal_nodes": int(len(contracted_real)),
             "n_nodes_removed": int(len(real) - len(contracted_real)),
             "n_source_nonbranching_chains": int(len(chains)),
-            "n_fixed_anchor_nodes": int(len(anchors)),
+            "n_structural_anchor_nodes": int(len(anchors)),
+            "n_fixed_anchor_nodes": int(len(anchors) - len(merged_anchors)),
+            "n_anchors_merged_with_upstream_degree_two": int(len(merged_anchors)),
             "n_merged_contracted_nodes": int(np.count_nonzero(group_sizes > 1)),
             "max_source_nodes_per_contracted_node": int(group_sizes.max()),
             "median_source_nodes_per_contracted_node": float(np.median(group_sizes)),
@@ -572,7 +589,7 @@ def main(argv=None):
             "topology_before": before,
             "topology_after": after,
             "topology_preserved": True,
-            "protected_nodes": "lineage roots, branch points, and terminal nodes",
+            "protected_nodes": "lineage roots and anchor-to-anchor edges; branch points and terminal nodes may absorb an upstream degree-two chain",
             "merge_inputs": "node embedding and stage span only",
             "celltype_usage": "post-contraction aggregation and plotting only",
             "markov_probabilities": "not recomputed; output represents the contracted tree topology",
