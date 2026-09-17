@@ -6,7 +6,8 @@ venv/
 
 # Local data and generated results
 data/
-results/
+results/*
+!results/README.md
 landmark_nodes*/
 landmark_tree*/
 *.npy

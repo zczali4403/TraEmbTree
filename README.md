@@ -1,48 +1,96 @@
 # TraEmb metacell developmental tree
 
-This repository contains the retained workflow for constructing a developmental tree from TraEmb embeddings without using cell-type labels during grouping, clustering, graph construction, or tree contraction.
+This repository provides a reproducible workflow for constructing lineage-aware developmental trees from TraEmb cell embeddings.
 
-## Inputs and annotation provenance
+Cell-type labels are excluded from microcell construction, Leiden clustering, graph construction, tree extraction, and node contraction. They are joined only after assignments have been fixed and are used for annotation and evaluation.
 
-- Cell embeddings: `/mnt/input/sc_cz/Concord/eval/2026_09_03/embeddings.npy`
-- Predicted developmental stage: `/mnt/input/sc_cz/Concord/eval/2026_09_03/predicted_stage.csv`
-- Cell metadata: `/mnt/input/sc_cz/Concord/data/all_lineage_260829_liver_reanno.csv`
-- CSR cell index directory: `/scratch/amlt_code/traemb_csr_0829`
+## Workflow overview
 
-`predicted_stage.csv` must contain `idx`, `cell_id`, and `predicted_stage`. The loader verifies both the embedding/CSR row index and cell ID before using a prediction.
+```text
+cell embeddings + lineage + predicted stage
+                    |
+                    v
+       cohesive lineage-stage microcells
+                    |
+                    v
+       lineage-local Leiden states
+                    |
+                    v
+          temporal trajectory nodes
+                    |
+                    v
+        stage-directed Markov node DAG
+                    |
+                    v
+       rooted maximum-weight tree
+                    |
+                    v
+       nonbranching-path contraction
+```
 
-Annotation provenance: the retained `0914` microcell run uses `all_lineage_260829_liver_reanno.csv`. Cell type is joined only after microcell assignments and embeddings have been fixed, and remains a post-hoc annotation rather than a grouping input.
+Known lineage is a hard stratum. Predicted stage is used for fixed-width microcell strata, temporal subdivision, edge direction, early-root selection, and contraction span limits.
+
+## Repository layout
+
+```text
+src/
+├── workflow/       Core microcell, node, tree, and contraction stages
+├── utilities/      Purity evaluation and embedding decoding
+└── visualization/  UMAP, PHATE, diffusion-map, and tree visualizations
+results/            Local generated outputs; ignored by Git except its README
+```
+
+The retained 0914 run, including exact inputs, parameters, statistics, purity, and decoded-expression outputs, is documented in [results/README.md](results/README.md).
 
 ## Environment
 
-The workflow is run in the `train` conda environment:
+Install the main dependencies pinned in `requirements.txt`:
 
 ```bash
-conda activate train
-pip install -r requirements.txt
+conda activate <environment>
+python -m pip install -r requirements.txt
 ```
 
-The pinned requirements cover the main workflow. Optional utilities also use SciPy, `igraph`, `leidenalg`, PyTorch, PHATE, and, for GPU UMAP, CuPy/RAPIDS with `rapids-singlecell`; these are supplied by the retained `train` environment.
+Optional utilities additionally use SciPy, `igraph`, `leidenalg`, PyTorch, PHATE, and, for GPU UMAP, CuPy/RAPIDS with `rapids-singlecell`. Run commands from the repository root.
 
-Run commands from the repository root:
+## Input contract
 
-```bash
-cd /mnt/input/sc_cz/Concord/eval/2026_08_19/TraEmbTree
-```
+### Cell embeddings
+
+`embeddings.npy` must be a finite, nonzero, two-dimensional NumPy array with one row per cell.
+
+### CSR cell index directory
+
+The directory supplied through `--csr-dir` must contain:
+
+- `cell_ids.npy`: cell IDs aligned row-for-row with the embeddings;
+- `lineage_ids.npy`: integer lineage assignments aligned with the embeddings;
+- `metadata.json`: at least the ordered `lineages` list;
+- `stage_ids.npy` and the ordered `stages` list when original rather than predicted stage is used.
+
+### Predicted stage
+
+The optional predicted-stage CSV must contain `idx`, `cell_id`, and `predicted_stage`. The loader accepts shuffled rows but requires exactly one finite prediction per cell and validates both the embedding/CSR row index and cell ID.
+
+### Cell metadata
+
+The annotation CSV must contain `cell` and `celltype`. Cell type is joined only after microcell assignments have been fixed.
 
 ## Workflow
 
-### 1. Construct cohesive metacells
+The examples use generic outputs under `results/`. Replace input paths with local data locations.
 
-Cells are first separated by lineage and fixed-width predicted-stage bins. Within each stratum, two embedding-only cohesive partition passes construct metacells. Cell type is joined only after all assignments have been fixed.
+### 1. Construct cohesive microcells
+
+Cells are separated by lineage and fixed-width stage bins. Two embedding-only cohesive partition passes then construct microcells inside every nonempty stratum.
 
 ```bash
 python src/workflow/build_cohesive_microcells.py \
-  --embeddings /mnt/input/sc_cz/Concord/eval/2026_09_03/embeddings.npy \
-  --csr-dir /scratch/amlt_code/traemb_csr_0829 \
-  --metadata /mnt/input/sc_cz/Concord/data/all_lineage_260829_liver_reanno.csv \
-  --predicted-stage /mnt/input/sc_cz/Concord/eval/2026_09_03/predicted_stage.csv \
-  --output-dir microcells_0914_predicted_stage3 \
+  --embeddings /path/to/embeddings.npy \
+  --csr-dir /path/to/csr_directory \
+  --metadata /path/to/cell_metadata.csv \
+  --predicted-stage /path/to/predicted_stage.csv \
+  --output-dir results/microcells \
   --stage-bin-width 3 \
   --stage-bin-origin 0 \
   --pile-size 20000 \
@@ -56,18 +104,24 @@ python src/workflow/build_cohesive_microcells.py \
   --faiss-threads 32
 ```
 
-Current result: 15,203,034 cells in 792,038 metacells across 199 nonempty lineage-stage strata. The embedding output is 100-dimensional.
+`--microcell-min-size` is a compactness-checked merge target, not a hard lower bound. Isolated cells and small groups remain when no safe local merge exists.
 
-The cohesive method treats `--microcell-min-size` as a merge target rather than a hard lower bound: small groups are retained when merging would violate local compactness. In the current run, the median metacell size is 16 cells, 84,392 groups are singletons, and 80.65% of cells belong to groups smaller than 50 cells.
+Principal outputs:
 
-### 2. Discover lineage-local trajectory nodes
+- `cell_to_microcell.npy`: cell-row to microcell assignment;
+- `microcell_embeddings.npy`: mean embedding per microcell;
+- `microcells.parquet`: size, stage, lineage, compactness, and annotation summaries;
+- `microcell_celltype_composition.parquet`: post-hoc cell-type composition;
+- `microcell_grouping_summary.json` and `run_config.json`: diagnostics and provenance.
 
-Cosine kNN and Leiden clustering are computed independently inside each of the 19 known lineages using metacell embeddings only. Each Leiden state is then subdivided by predicted-stage bins of width 3. Temporal nodes with fewer than `--min-node-cells` cells are excluded from downstream node outputs without using cell type. Their original IDs and assignments remain in audit columns and tables.
+### 2. Discover lineage-local temporal nodes
+
+Cosine kNN and Leiden clustering are computed independently within each lineage using microcell embeddings. Each state is divided into fixed-width predicted-stage bins. Nodes below the support threshold are excluded without consulting cell type.
 
 ```bash
 python src/workflow/discover_leiden_trajectory_nodes.py \
-  --input-dir microcells_0914_predicted_stage3 \
-  --output-dir leiden_nodes_0914_r05_stage3_min50 \
+  --input-dir results/microcells \
+  --output-dir results/trajectory_nodes \
   --knn 30 \
   --leiden-resolution 0.5 \
   --leiden-iterations 2 \
@@ -77,19 +131,25 @@ python src/workflow/discover_leiden_trajectory_nodes.py \
   --seed 42
 ```
 
-The output includes `filtered_small_nodes.parquet`; excluded metacells retain `raw_node_id` and receive `node_id=-1`. Retained nodes are renumbered contiguously for all downstream scripts. `summary.json` reports both raw and retained node counts and the excluded cell fraction.
+Principal outputs:
 
-Current result: 283 embedding states produce 2,117 raw temporal nodes. After the 50-cell support filter, 1,613 nodes remain. The 504 excluded nodes contain 8,993 cells, or 0.0592% of all cells.
+- `nodes.parquet` and `node_embeddings.npy`: retained temporal nodes;
+- `states.parquet`: lineage-local Leiden states;
+- `microcell_node_assignments.parquet`: assignments and audit IDs;
+- `filtered_small_nodes.parquet`: excluded low-support nodes;
+- composition tables, `summary.json`, `run_config.json`, and `complete.json`.
 
-### 3. Build the lineage-aware Markov node tree
+Excluded microcells retain `raw_node_id` and receive `node_id=-1`. Retained nodes are renumbered contiguously from zero.
 
-For each lineage, an exact cosine kNN graph is built from the node embeddings. Predicted stage orients every real edge from earlier to later. All nodes within `--root-stage-window` of the lineage's earliest retained stage connect directly to its virtual root; incoming real-node edges to this early root set are removed. Embedding distance determines edge weight; cell type is excluded. Markov transition probabilities and terminal fate probabilities are calculated before extracting one rooted tree.
+### 3. Build the lineage-aware Markov tree
+
+An exact cosine kNN graph is built independently for each lineage. Predicted stage directs real edges from earlier to later, and early nodes connect to a lineage virtual root. Markov quantities are calculated on the candidate DAG before a rooted maximum-weight tree is extracted.
 
 ```bash
 python src/workflow/build_markov_node_tree.py \
-  --input-dir leiden_nodes_0914_r05_stage3_min50 \
-  --microcell-dir microcells_0914_predicted_stage3 \
-  --output-dir markov_tree_0914_r05_stage3_min50_nodeknn_k10_rootw05 \
+  --input-dir results/trajectory_nodes \
+  --microcell-dir results/microcells \
+  --output-dir results/markov_tree \
   --knn 10 \
   --mutual-knn-bonus 1.5 \
   --stage-column cell_weighted_mean_stage \
@@ -97,104 +157,104 @@ python src/workflow/build_markov_node_tree.py \
   --dpi 220
 ```
 
-Current result: 10,075 candidate edges and 1,613 temporal nodes. With 19 lineage virtual roots and one global virtual root, the complete tree has 1,633 nodes and 1,632 edges. The candidate graph contains 41 nearest-earlier-node fallback edges; all 41 are selected into the tree.
+Principal outputs:
 
-The Markov summary counts absorbing sinks in the full candidate DAG; this is a different quantity from the extracted tree leaf count reported during contraction.
+- `candidate_markov_edges.parquet`: directed candidate graph;
+- `node_fate_probabilities.parquet`: terminal fate probabilities;
+- `tree_nodes.parquet` and `tree_edges.parquet`: extracted tree;
+- `branch_segments.parquet`: compressed paths for reporting;
+- lineage summaries, plots, `summary.json`, and `run_config.json`.
 
-### 4. Contract redundant nodes after tree construction
+Nearest-earlier-node fallback edges ensure reachability when a node has no valid incoming edge in its directed kNN neighborhood.
 
-Only nodes along nonbranching paths can merge. Lineage roots and anchor-to-anchor edges are protected; branch points and terminal nodes may absorb an upstream degree-two chain without changing the branch topology. A candidate node joins the current group only when its cosine distance to the weighted group center is at most 0.15 and the resulting cell-level stage span is at most 8. Cell type is aggregated after contraction and never affects merging.
+### 4. Contract redundant tree nodes
+
+Only nodes along nonbranching paths can merge. Lineage roots and anchor-to-anchor edges are protected. Merge decisions use embedding distance and cell-level stage span only.
 
 ```bash
 python src/workflow/contract_markov_tree_nodes.py \
-  --tree-dir markov_tree_0914_r05_stage3_min50_nodeknn_k10_rootw05 \
-  --node-dir leiden_nodes_0914_r05_stage3_min50 \
-  --output-dir markov_tree_0914_r05_stage3_min50_nodeknn_k10_rootw05_contracted_d015_stage8 \
+  --tree-dir results/markov_tree \
+  --node-dir results/trajectory_nodes \
+  --output-dir results/contracted_tree \
   --max-cosine-distance 0.15 \
   --max-stage-span 8 \
   --dpi 220
 ```
 
-Current result: 1,613 temporal nodes contract to 924, removing 689 redundant nodes. The extracted-tree topology is unchanged: 66 early-root temporal nodes, 197 branch points, and 315 terminal leaves are preserved. The 66 early-root nodes attach to the 19 lineage virtual roots. `source_to_contracted_nodes.parquet` records the exact old-to-new node mapping.
+Principal outputs:
 
-The contracted output represents the final tree topology. Markov probabilities are not recomputed after contraction.
+- `tree_nodes.parquet` and `tree_edges.parquet`: final topology;
+- `node_embeddings.npy`: cell-count-weighted contracted embeddings;
+- `source_to_contracted_nodes.parquet`: exact old-to-new mapping;
+- `node_celltype_composition.parquet`: post-contraction annotation;
+- plots, `summary.json`, and `run_config.json`.
 
-## Evaluation and visualization
+The script verifies that branch topology, total cell count, and total microcell count are preserved. Markov probabilities are not recomputed after contraction.
 
-Evaluate metacell purity:
+Regenerate plots without rerunning contraction:
+
+```bash
+python src/workflow/contract_markov_tree_nodes.py \
+  --tree-dir results/markov_tree \
+  --output-dir results/contracted_tree \
+  --plots-only \
+  --lineage-node-size 45 \
+  --lineage-node-label-size 5 \
+  --dpi 220
+```
+
+Per-lineage tree points are labeled with contracted `node_id`.
+
+## Evaluation
 
 ```bash
 python src/utilities/evaluate_microcell_purity.py \
-  --input-dir microcells_0914_predicted_stage3 \
-  --output-dir microcells_0914_predicted_stage3/purity_evaluation \
+  --input-dir results/microcells \
+  --output-dir results/microcells/purity_evaluation \
+  --overwrite
+
+python src/utilities/evaluate_node_purity.py \
+  --input-dir results/contracted_tree \
+  --output-dir results/contracted_tree/purity_evaluation \
   --overwrite
 ```
 
-Evaluate pre-contraction trajectory-node purity:
+Purity is an external evaluation using post-hoc annotations, not an optimization target.
+
+## Decode contracted-node embeddings
 
 ```bash
-python src/utilities/evaluate_node_purity.py \
-  --input-dir leiden_nodes_0914_r05_stage3_min50 \
-  --output-dir leiden_nodes_0914_r05_stage3_min50/purity_evaluation \
-  --overwrite
+python src/utilities/decode_node_embeddings.py \
+  --embedding-path results/contracted_tree/node_embeddings.npy \
+  --node-table results/contracted_tree/tree_nodes.parquet \
+  --checkpoint /path/to/model.ckpt \
+  --traemb-dir /path/to/TraEmb \
+  --config /path/to/config.py \
+  --gene-names /path/to/gene_names.txt \
+  --output-dir results/contracted_tree/decoder_expression
 ```
 
-Evaluate contracted-node purity:
+The expression matrix is aligned by contiguous `node_id`. `node_decoded_nodes.csv` annotates rows and `node_decoded_genes.csv` annotates columns.
 
-```bash
-python src/utilities/evaluate_node_purity.py \
-  --input-dir markov_tree_0914_r05_stage3_min50_nodeknn_k10_rootw05_contracted_d015_stage8 \
-  --output-dir markov_tree_0914_r05_stage3_min50_nodeknn_k10_rootw05_contracted_d015_stage8/purity_evaluation \
-  --overwrite
-```
-
-Current cell-weighted cell-type purities are 0.8618 for microcells, 0.7050 before contraction, and 0.6919 after contraction. Cell-type labels are evaluation annotations, not grouping or tree inputs.
-
-Compute two- and three-dimensional metacell UMAPs:
+## Visualization
 
 ```bash
 python src/visualization/plot_microcell_umap_scanpy.py \
-  --input-dir microcells_0914_predicted_stage3 \
+  --input-dir results/microcells \
   --n-neighbors 30 \
   --min-dist 0.25 \
   --seed 42 \
   --dpi 220
 ```
 
-Represent the uncontracted tree using stratified samples of its underlying cells. Each cell uses its own predicted stage on the horizontal axis; the tree topology is unchanged.
+Additional scripts provide RAPIDS UMAP, PHATE, diffusion maps, stage-subspace diagnostics, contracted-node UMAP, and sampled-cell tree views. Run a script with `--help` for its complete interface.
 
-```bash
-python src/visualization/plot_markov_tree_sampled_cells.py \
-  --tree-dir markov_tree_0914_r05_stage3_min50_nodeknn_k10_rootw05 \
-  --node-dir leiden_nodes_0914_r05_stage3_min50 \
-  --microcell-dir microcells_0914_predicted_stage3 \
-  --predicted-stage /mnt/input/sc_cz/Concord/eval/2026_09_03/predicted_stage.csv \
-  --metadata /mnt/input/sc_cz/Concord/data/all_lineage_260829_liver_reanno.csv \
-  --cells-per-node 150 \
-  --seed 42 \
-  --dpi 220
-```
+For sampled-cell tree plots, point density reflects independent per-node sampling rather than population abundance.
 
-Because cells are sampled separately within every node, point density in the sampled-cell figure does not represent population abundance.
+## Reproducibility and output safety
 
-## Retained source files
-
-```text
-src/workflow/build_cohesive_microcells.py
-src/workflow/cohesive_microcells.py
-src/workflow/predicted_stage.py
-src/workflow/discover_leiden_trajectory_nodes.py
-src/workflow/build_markov_node_tree.py
-src/workflow/contract_markov_tree_nodes.py
-src/utilities/evaluate_microcell_purity.py
-src/utilities/evaluate_node_purity.py
-src/utilities/decode_node_embeddings.py
-src/visualization/plot_microcell_umap_scanpy.py
-src/visualization/plot_microcell_umap_rsc.py
-src/visualization/plot_contracted_nodes_umap_rsc.py
-src/visualization/plot_microcell_phate.py
-src/visualization/plot_microcell_diffusion_map.py
-src/visualization/diagnose_microcell_stage_subspace.py
-src/visualization/sweep_microcell_stage_dimension_weight.py
-src/visualization/plot_markov_tree_sampled_cells.py
-```
+- Workflow stages record configuration and summary JSON files with their outputs.
+- Most stages refuse to overwrite existing output directories.
+- Atomic-build directories preserve partial output after failure.
+- Fixed seeds control randomized operations where applicable.
+- Generated arrays, tables, figures, and result directories are excluded from Git; source and documentation remain tracked.
