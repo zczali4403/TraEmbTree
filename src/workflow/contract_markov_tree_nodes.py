@@ -43,6 +43,15 @@ def parse_args(argv=None):
         "--max-stage-span", type=float, default=6.0,
         help="Largest allowed max_stage-min_stage across a contracted node.")
     parser.add_argument("--dpi", type=int, default=220)
+    parser.add_argument(
+        "--plots-only", action="store_true",
+        help="Redraw plots from an existing contracted output without rerunning contraction.")
+    parser.add_argument(
+        "--lineage-node-size", type=float, default=45.0,
+        help="Point size in per-lineage cell-type trees.")
+    parser.add_argument(
+        "--lineage-node-label-size", type=float, default=5.0,
+        help="Font size for contracted node_id labels in per-lineage trees.")
     return parser.parse_args(argv)
 
 
@@ -373,10 +382,12 @@ def discrete_colors(size, matplotlib):
     return colors[:size]
 
 
-def plot_outputs(nodes, edges, output, source_tree_dir, dpi):
+def plot_outputs(nodes, edges, output, source_tree_dir, dpi,
+                 lineage_node_size=45.0, lineage_node_label_size=5.0):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    import matplotlib.patheffects as path_effects
     from matplotlib.lines import Line2D
 
     real = nodes.node_type.eq("temporal_node")
@@ -474,9 +485,18 @@ def plot_outputs(nodes, edges, output, source_tree_dir, dpi):
                 [lookup.at[edge.parent_id, "tree_stage"],
                  lookup.at[edge.child_id, "tree_stage"]],
                 color="#999999", linewidth=.55, alpha=.6, zorder=1)
-        ax.scatter(nodes.loc[mask, "tree_x"], nodes.loc[mask, "tree_stage"],
-                   c=[colors[label] for label in local_labels], s=16,
-                   linewidths=0, zorder=2)
+        local_nodes = nodes.loc[mask]
+        ax.scatter(local_nodes["tree_x"], local_nodes["tree_stage"],
+                   c=[colors[label] for label in local_labels], s=lineage_node_size,
+                   edgecolors="black", linewidths=.25, zorder=2)
+        for row in local_nodes.itertuples(index=False):
+            label = ax.annotate(
+                str(row.node_id), (row.tree_x, row.tree_stage),
+                xytext=(3, 0), textcoords="offset points",
+                ha="left", va="center", fontsize=lineage_node_label_size,
+                color="black", zorder=4)
+            label.set_path_effects([
+                path_effects.withStroke(linewidth=1.25, foreground="white")])
         root = nodes[nodes.node_type.eq("lineage_root") & nodes.lineage.eq(lineage)]
         ax.scatter(root.tree_x, root.tree_stage, marker="*", s=80,
                    color="black", zorder=3)
@@ -528,6 +548,27 @@ def main(argv=None):
     source_tree = args.tree_dir.resolve()
     source_nodes = args.node_dir.resolve()
     output = args.output_dir.resolve()
+    if args.lineage_node_size <= 0 or not np.isfinite(args.lineage_node_size):
+        raise ValueError("--lineage-node-size must be positive and finite")
+    if (args.lineage_node_label_size <= 0
+            or not np.isfinite(args.lineage_node_label_size)):
+        raise ValueError("--lineage-node-label-size must be positive and finite")
+    if args.plots_only:
+        if not output.is_dir():
+            raise FileNotFoundError(
+                f"Existing contracted output directory not found: {output}")
+        node_path = output / "tree_nodes.parquet"
+        edge_path = output / "tree_edges.parquet"
+        if not node_path.is_file() or not edge_path.is_file():
+            raise FileNotFoundError(
+                f"Existing tree tables not found in contracted output: {output}")
+        log(f"redrawing plots from existing contracted tree tables in {output}")
+        plot_outputs(
+            pd.read_parquet(node_path), pd.read_parquet(edge_path),
+            output, source_tree, args.dpi,
+            args.lineage_node_size, args.lineage_node_label_size)
+        log(f"plots updated: {output}")
+        return
     temporary = output.with_name(f".{output.name}.building")
     if output.exists():
         raise FileExistsError(f"Output path already exists: {output}")
@@ -600,7 +641,9 @@ def main(argv=None):
                   for key, value in vars(args).items()}
         (temporary / "run_config.json").write_text(
             json.dumps(config, indent=2, ensure_ascii=False) + "\n")
-        plot_outputs(nodes, edges, temporary, source_tree, args.dpi)
+        plot_outputs(
+            nodes, edges, temporary, source_tree, args.dpi,
+            args.lineage_node_size, args.lineage_node_label_size)
         (temporary / "complete.json").write_text(json.dumps({"complete": True}) + "\n")
         temporary.rename(output)
         log(f"done: {output}")
