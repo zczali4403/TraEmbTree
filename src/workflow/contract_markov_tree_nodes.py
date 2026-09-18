@@ -477,36 +477,88 @@ def rebuild_tree(real_nodes, old_tree_nodes, old_tree_edges, old_to_new, members
 
 
 def tree_layout(nodes, edges):
+    """Lay out each lineage as a tidy tree with contiguous subtree intervals."""
     children = defaultdict(list)
     for edge in edges.itertuples(index=False):
         children[int(edge.parent_id)].append(int(edge.child_id))
     roots = nodes[nodes.node_type.eq("lineage_root")]
     stage = nodes.set_index("node_id").tree_stage.to_dict()
     x = {}
+
+    def terminal_summary(node, cache):
+        if node in cache:
+            return cache[node]
+        if not children[node]:
+            result = (float(stage[node]), float(stage[node]), 1)
+        else:
+            values = [terminal_summary(child, cache) for child in children[node]]
+            result = (
+                min(value[0] for value in values),
+                float(np.average(
+                    [value[1] for value in values],
+                    weights=[value[2] for value in values])),
+                sum(value[2] for value in values),
+            )
+        cache[node] = result
+        return result
+
     for band, root_row in enumerate(roots.sort_values("lineage").itertuples()):
         root = int(root_row.node_id)
+        cache = {}
+        terminal_summary(root, cache)
+        ordered_children = {}
         descendants, stack = [], [root]
         while stack:
             node = stack.pop()
             descendants.append(node)
-            stack.extend(children[node])
-        leaves = sorted(
-            [node for node in descendants if not children[node]],
-            key=lambda node: (stage[node], node))
+            ordered_children[node] = sorted(
+                children[node],
+                key=lambda child: (
+                    float(stage[child]), cache[child][0],
+                    cache[child][1], int(child)))
+            stack.extend(reversed(ordered_children[node]))
+
+        leaves = []
+
+        def collect_leaves(node):
+            if not ordered_children[node]:
+                leaves.append(node)
+                return
+            for child in ordered_children[node]:
+                collect_leaves(child)
+
+        collect_leaves(root)
         if len(leaves) == 1:
             x[leaves[0]] = band + .5
         else:
             for position, leaf in enumerate(leaves):
                 x[leaf] = band + .05 + .9 * position / (len(leaves) - 1)
-        for node in sorted(descendants, key=lambda value: (stage[value], value), reverse=True):
-            if node not in x:
-                x[node] = float(np.mean([x[child] for child in children[node]]))
+
+        leaf_interval = {}
+
+        def place_internal(node):
+            if not ordered_children[node]:
+                leaf_interval[node] = (x[node], x[node])
+                return leaf_interval[node]
+            intervals = [place_internal(child) for child in ordered_children[node]]
+            left = min(interval[0] for interval in intervals)
+            right = max(interval[1] for interval in intervals)
+            x[node] = float(np.mean([
+                x[child] for child in ordered_children[node]]))
+            leaf_interval[node] = (left, right)
+            return leaf_interval[node]
+
+        place_internal(root)
+
     global_roots = nodes[nodes.node_type.eq("global_root")]
     if len(global_roots) != 1:
         raise ValueError("Expected exactly one global root")
     global_root = int(global_roots.iloc[0].node_id)
     x[global_root] = float(np.mean([x[int(node)] for node in roots.node_id]))
     result = nodes.copy()
+    if result.node_id.map(x).isna().any():
+        missing = result.loc[result.node_id.map(x).isna(), "node_id"].tolist()
+        raise RuntimeError(f"Tree layout did not place nodes: {missing[:10]}")
     result["tree_x"] = result.node_id.map(x).astype(float)
     result["tree_y"] = result.tree_stage.astype(float)
     return result
@@ -722,9 +774,10 @@ def main(argv=None):
             raise FileNotFoundError(
                 f"Existing tree tables not found in contracted output: {output}")
         log(f"redrawing plots from existing contracted tree tables in {output}")
+        plot_edges = pd.read_parquet(edge_path)
+        plot_nodes = tree_layout(pd.read_parquet(node_path), plot_edges)
         plot_outputs(
-            pd.read_parquet(node_path), pd.read_parquet(edge_path),
-            output, source_tree, args.dpi,
+            plot_nodes, plot_edges, output, source_tree, args.dpi,
             args.lineage_node_size, args.lineage_node_label_size)
         log(f"plots updated: {output}")
         return
