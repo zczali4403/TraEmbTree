@@ -3,8 +3,9 @@
 
 Consecutive temporal nodes on nonbranching paths may be merged. Optionally,
 similar siblings may also merge when they share a real parent, are close in
-embedding and mean stage, and at least one sibling is a leaf. Lineage roots
-remain singleton anchors. Merge decisions never use cell-type labels; those
+embedding and mean stage, and at least one sibling is a leaf. A final path pass
+cleans up nonbranching chains created by sibling merging. Lineage roots remain
+singleton anchors. Merge decisions never use cell-type labels; those
 labels are aggregated afterwards for evaluation and plots.
 """
 from __future__ import annotations
@@ -358,6 +359,57 @@ def merge_sibling_groups(groups, real_nodes, embeddings, real_edges,
         "merged_mean_stage", "left_was_leaf", "right_was_leaf",
     ]
     return groups, pd.DataFrame(history, columns=history_columns)
+
+
+def contract_group_paths(groups, real_nodes, embeddings, real_edges,
+                         max_distance, max_stage_span):
+    """Re-run path contraction on already aggregated source-node groups."""
+    lookup = real_nodes.set_index("node_id")
+    pseudo_rows = []
+    pseudo_embeddings = []
+    for group_id, group in enumerate(groups):
+        frame = lookup.loc[group]
+        weights = frame.n_cells.to_numpy(dtype=np.float64)
+        pseudo_rows.append({
+            "node_id": group_id,
+            "lineage": str(frame.lineage.iloc[0]),
+            "n_cells": int(weights.sum()),
+            "min_stage": float(frame.min_stage.min()),
+            "max_stage": float(frame.max_stage.max()),
+            "cell_weighted_mean_stage": float(np.average(
+                frame.cell_weighted_mean_stage.to_numpy(dtype=np.float64),
+                weights=weights)),
+        })
+        pseudo_embeddings.append(np.average(
+            embeddings[group], axis=0, weights=weights).astype(np.float32))
+
+    pseudo_nodes = pd.DataFrame(pseudo_rows)
+    pseudo_embeddings = np.stack(pseudo_embeddings)
+    pseudo_parents, pseudo_children = contracted_group_adjacency(
+        groups, real_edges)
+    pseudo_parents = defaultdict(
+        list, {key: sorted(value) for key, value in pseudo_parents.items()})
+    pseudo_children = defaultdict(
+        list, {key: sorted(value) for key, value in pseudo_children.items()})
+    super_groups, chains, anchors = make_groups(
+        pseudo_nodes, pseudo_embeddings, pseudo_parents, pseudo_children,
+        max_distance, max_stage_span)
+
+    result = []
+    for super_group in super_groups:
+        source_nodes = [
+            source_node
+            for group_id in super_group
+            for source_node in groups[group_id]
+        ]
+        source_nodes.sort(key=lambda node: (
+            float(lookup.at[node, "cell_weighted_mean_stage"]), int(node)))
+        result.append(source_nodes)
+    result.sort(key=lambda group: (
+        str(lookup.at[group[0], "lineage"]),
+        min(float(lookup.at[node, "cell_weighted_mean_stage"]) for node in group),
+        min(group)))
+    return result, chains, anchors
 
 
 def aggregate_composition(groups, composition):
@@ -801,6 +853,8 @@ def main(argv=None):
             "right_source_node_ids", "cosine_distance", "mean_stage_gap",
             "merged_mean_stage", "left_was_leaf", "right_was_leaf",
         ])
+        post_sibling_path_merges = 0
+        post_sibling_path_chains = 0
         if args.merge_siblings:
             log("merging close sibling nodes")
             groups, sibling_history = merge_sibling_groups(
@@ -808,6 +862,15 @@ def main(argv=None):
                 args.sibling_max_cosine_distance,
                 args.sibling_max_stage_gap)
             log(f"sibling merges: {len(sibling_history):,}")
+            before_cleanup = len(groups)
+            groups, cleanup_chains, _ = contract_group_paths(
+                groups, real, embeddings, real_edges,
+                args.max_cosine_distance, args.max_stage_span)
+            post_sibling_path_merges = before_cleanup - len(groups)
+            post_sibling_path_chains = len(cleanup_chains)
+            log(
+                f"post-sibling path merges: "
+                f"{post_sibling_path_merges:,}")
         contracted_composition, old_to_new = aggregate_composition(groups, composition)
         contracted_real, contracted_embeddings, membership = aggregate_real_nodes(
             groups, real, embeddings, contracted_composition)
@@ -853,9 +916,16 @@ def main(argv=None):
             "n_source_temporal_nodes": int(len(real)),
             "n_contracted_temporal_nodes": int(len(contracted_real)),
             "n_nodes_removed": int(len(real) - len(contracted_real)),
-            "n_nodes_removed_by_path_contraction": int(len(real) - len(chain_groups)),
+            "n_nodes_removed_by_path_contraction": int(
+                len(real) - len(chain_groups) + post_sibling_path_merges),
+            "n_nodes_removed_by_initial_path_contraction": int(
+                len(real) - len(chain_groups)),
             "n_nodes_removed_by_sibling_merge": int(len(sibling_history)),
+            "n_nodes_removed_by_post_sibling_path_contraction": int(
+                post_sibling_path_merges),
             "n_source_nonbranching_chains": int(len(chains)),
+            "n_post_sibling_nonbranching_chains": int(
+                post_sibling_path_chains),
             "n_structural_anchor_nodes": int(len(anchors)),
             "n_fixed_anchor_nodes": int(
                 len(anchors) - len(chain_merged_anchors)),

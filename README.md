@@ -116,7 +116,7 @@ Principal outputs:
 
 ### 2. Discover lineage-local temporal nodes
 
-Cosine kNN and Leiden clustering are computed independently within each lineage using microcell embeddings. Each state is divided into fixed-width predicted-stage bins. Nodes below the support threshold are excluded without consulting cell type.
+Cosine kNN and Leiden clustering are computed independently within each lineage using microcell embeddings. By default, each state is divided into fixed-width predicted-stage bins. An optional adaptive method instead finds valleys in a cell-count-weighted stage KDE, merges undersupported adjacent segments, and recursively splits broad segments at feasible cell-weighted medians. Nodes below the final support threshold are excluded without consulting cell type.
 
 ```bash
 python src/workflow/discover_leiden_trajectory_nodes.py \
@@ -131,12 +131,35 @@ python src/workflow/discover_leiden_trajectory_nodes.py \
   --seed 42
 ```
 
+Adaptive temporal subdivision avoids global stage-bin boundaries:
+
+```bash
+python src/workflow/discover_leiden_trajectory_nodes.py \
+  --input-dir results/microcells \
+  --output-dir results/trajectory_nodes_kde \
+  --knn 30 \
+  --leiden-resolution 0.5 \
+  --leiden-iterations 2 \
+  --temporal-split-method kde \
+  --stage-kde-bandwidth 0.5 \
+  --stage-min-peak-distance 1.0 \
+  --stage-valley-ratio 0.6 \
+  --max-node-stage-span 3 \
+  --min-segment-metacells 3 \
+  --min-node-cells 50 \
+  --threads 32 \
+  --seed 42
+```
+
+The maximum-span rule is a support-constrained safeguard: a broad segment is split only when both sides retain the requested minimum cells and metacells. `temporal_split_diagnostics.parquet` records KDE peaks, accepted valleys, small-segment merges, median splits, and final segment counts for every Leiden state.
+
 Principal outputs:
 
 - `nodes.parquet` and `node_embeddings.npy`: retained temporal nodes;
 - `states.parquet`: lineage-local Leiden states;
 - `microcell_node_assignments.parquet`: assignments and audit IDs;
 - `filtered_small_nodes.parquet`: excluded low-support nodes;
+- `temporal_split_diagnostics.parquet`: per-state adaptive-split audit table when KDE is used;
 - composition tables, `summary.json`, `run_config.json`, and `complete.json`.
 
 Excluded microcells retain `raw_node_id` and receive `node_id=-1`. Retained nodes are renumbered contiguously from zero.
@@ -181,7 +204,7 @@ python src/workflow/contract_markov_tree_nodes.py \
   --dpi 220
 ```
 
-Optional topology-simplifying sibling merging runs after path contraction. Two siblings may merge when they share a real temporal-node parent, have cosine distance at most 0.20 and mean-stage gap at most 1.0, and at least one is a leaf. Direct children of lineage virtual roots are not merged.
+Optional topology-simplifying sibling merging runs after path contraction. Two siblings may merge when they share a real temporal-node parent, have cosine distance at most 0.20 and mean-stage gap at most 1.0, and at least one is a leaf. Direct children of lineage virtual roots are not merged. A second path-contraction pass then removes any new nonbranching chains created by sibling merging.
 
 ```bash
 python src/workflow/contract_markov_tree_nodes.py \

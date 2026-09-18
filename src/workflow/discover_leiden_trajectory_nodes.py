@@ -2,9 +2,10 @@
 """Discover candidate trajectory nodes independently within known lineages.
 
 Within each lineage, Scanpy cosine neighbors and Leiden use embeddings only.
-Cell-type labels never enter clustering. After Leiden, continuous predicted stage
-splits each embedding state into temporal nodes. This script does not connect
-nodes and does not construct a tree.
+Cell-type labels never enter clustering. After Leiden, predicted stage splits
+each embedding state into temporal nodes using either fixed-width bins or
+adaptive cell-weighted KDE valleys with broad-segment median splitting. This
+script does not connect nodes and does not construct a tree.
 """
 from __future__ import annotations
 
@@ -25,10 +26,28 @@ def parse_args(argv=None):
     parser.add_argument("--knn", type=int, default=30)
     parser.add_argument("--leiden-resolution", type=float, default=0.5)
     parser.add_argument("--leiden-iterations", type=int, default=2)
+    parser.add_argument(
+        "--temporal-split-method", choices=("fixed", "kde"), default="fixed",
+        help="Fixed-width bins or adaptive weighted stage-density segmentation.")
     parser.add_argument("--stage-bin-width", type=float, default=2.0)
     parser.add_argument(
+        "--stage-kde-bandwidth", type=float, default=0.5,
+        help="Gaussian KDE bandwidth in predicted-stage units for adaptive splitting.")
+    parser.add_argument(
+        "--stage-min-peak-distance", type=float, default=1.0,
+        help="Minimum stage separation between KDE peaks.")
+    parser.add_argument(
+        "--stage-valley-ratio", type=float, default=0.6,
+        help="Accept a valley when its density is at most this fraction of the lower adjacent peak.")
+    parser.add_argument(
+        "--max-node-stage-span", type=float, default=3.0,
+        help="KDE segments wider than this are recursively split at a cell-weighted median; 0 disables.")
+    parser.add_argument(
+        "--min-segment-metacells", type=int, default=3,
+        help="Minimum metacells per adaptive segment before it is merged with a temporal neighbor.")
+    parser.add_argument(
         "--min-node-cells", type=int, default=50,
-        help="Exclude temporal nodes with fewer cells from final node outputs and downstream trees.")
+        help="Minimum cells for adaptive segments and the final node support filter.")
     parser.add_argument("--threads", type=int, default=16)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--plot-max-points", type=int, default=400_000)
@@ -145,6 +164,204 @@ def make_temporal_nodes(state_id, stage, width):
     pairs = pd.MultiIndex.from_arrays([state_id, stage_bin])
     node_id, _ = pd.factorize(pairs, sort=True)
     return stage_bin, node_id.astype(np.int32)
+
+
+def relabel_temporal_segments(labels, stage):
+    """Renumber one-dimensional segments in increasing stage order."""
+    labels = np.asarray(labels)
+    order = sorted(
+        np.unique(labels),
+        key=lambda label: (
+            float(np.min(stage[labels == label])), int(label)))
+    mapping = {label: index for index, label in enumerate(order)}
+    return np.asarray([mapping[label] for label in labels], dtype=np.int32)
+
+
+def merge_small_temporal_segments(labels, stage, weights,
+                                  min_cells, min_metacells):
+    """Merge undersupported contiguous segments into the closest neighbor."""
+    labels = relabel_temporal_segments(labels, stage)
+    merges = 0
+    while len(np.unique(labels)) > 1:
+        rows = []
+        for label in np.unique(labels):
+            members = labels == label
+            total = float(weights[members].sum())
+            mean = float(np.average(stage[members], weights=weights[members]))
+            rows.append((int(label), int(members.sum()), total, mean))
+        deficient = [
+            row for row in rows
+            if row[1] < min_metacells or row[2] < min_cells
+        ]
+        if not deficient:
+            break
+        label, _, _, mean = min(
+            deficient, key=lambda row: (row[2], row[1], row[0]))
+        row_lookup = {row[0]: row for row in rows}
+        neighbors = [
+            neighbor for neighbor in (label - 1, label + 1)
+            if neighbor in row_lookup
+        ]
+        target = min(
+            neighbors,
+            key=lambda neighbor: (
+                abs(mean - row_lookup[neighbor][3]),
+                -row_lookup[neighbor][2], neighbor))
+        labels[labels == label] = target
+        labels = relabel_temporal_segments(labels, stage)
+        merges += 1
+    return labels, merges
+
+
+def split_wide_temporal_segments(labels, stage, weights, max_span,
+                                 min_cells, min_metacells):
+    """Recursively split broad segments at feasible cell-weighted medians."""
+    labels = relabel_temporal_segments(labels, stage)
+    splits = 0
+    if max_span <= 0:
+        return labels, splits
+    while True:
+        split_applied = False
+        for label in np.unique(labels):
+            members = np.flatnonzero(labels == label)
+            local_stage = stage[members]
+            if float(local_stage.max() - local_stage.min()) <= max_span:
+                continue
+            order = np.argsort(local_stage, kind="stable")
+            ordered_members = members[order]
+            ordered_stage = stage[ordered_members]
+            ordered_weights = weights[ordered_members]
+            cumulative_cells = np.cumsum(ordered_weights)
+            cumulative_metacells = np.arange(1, len(members) + 1)
+            total_cells = float(cumulative_cells[-1])
+            candidates = np.flatnonzero(ordered_stage[:-1] < ordered_stage[1:])
+            valid = candidates[
+                (cumulative_cells[candidates] >= min_cells)
+                & (total_cells - cumulative_cells[candidates] >= min_cells)
+                & (cumulative_metacells[candidates] >= min_metacells)
+                & (len(members) - cumulative_metacells[candidates]
+                   >= min_metacells)
+            ]
+            if not len(valid):
+                continue
+            cut = int(min(
+                valid,
+                key=lambda position: (
+                    abs(float(cumulative_cells[position]) - total_cells / 2),
+                    float(ordered_stage[position]), position)))
+            new_label = int(labels.max()) + 1
+            labels[ordered_members[cut + 1:]] = new_label
+            labels = relabel_temporal_segments(labels, stage)
+            splits += 1
+            split_applied = True
+            break
+        if not split_applied:
+            break
+    return labels, splits
+
+
+def kde_temporal_segments(stage, weights, bandwidth, min_peak_distance,
+                          valley_ratio, max_span, min_cells,
+                          min_metacells):
+    """Split one Leiden state into contiguous weighted stage-density basins."""
+    from scipy.ndimage import gaussian_filter1d
+    from scipy.signal import find_peaks
+
+    stage = np.asarray(stage, dtype=np.float64)
+    weights = np.asarray(weights, dtype=np.float64)
+    stage_min, stage_max = float(stage.min()), float(stage.max())
+    accepted_valleys = []
+    peak_count = 1
+    if len(np.unique(stage)) < 3 or stage_max <= stage_min:
+        labels = np.zeros(len(stage), dtype=np.int32)
+    else:
+        target_step = min(0.1, max(0.01, bandwidth / 8))
+        grid_size = int(np.clip(
+            np.ceil((stage_max - stage_min) / target_step) + 1,
+            32, 4096))
+        edges = np.linspace(stage_min, stage_max, grid_size + 1)
+        grid = (edges[:-1] + edges[1:]) / 2
+        step = float(edges[1] - edges[0])
+        histogram, _ = np.histogram(stage, bins=edges, weights=weights)
+        density = gaussian_filter1d(
+            histogram.astype(np.float64),
+            sigma=max(bandwidth / step, 1e-6), mode="nearest")
+        distance_bins = max(1, int(np.ceil(min_peak_distance / step)))
+        peaks = find_peaks(density, distance=distance_bins)[0].tolist()
+        if len(density) > 1 and density[0] > density[1]:
+            peaks.append(0)
+        if len(density) > 1 and density[-1] > density[-2]:
+            peaks.append(len(density) - 1)
+        peaks = sorted(set(peaks))
+        peak_count = len(peaks)
+        for left, right in zip(peaks[:-1], peaks[1:]):
+            if grid[right] - grid[left] < min_peak_distance:
+                continue
+            valley = left + int(np.argmin(density[left:right + 1]))
+            lower_peak = min(float(density[left]), float(density[right]))
+            ratio = (float(density[valley]) / lower_peak
+                     if lower_peak > 0 else 1.0)
+            if ratio <= valley_ratio:
+                accepted_valleys.append(float(grid[valley]))
+        labels = np.searchsorted(
+            np.asarray(accepted_valleys), stage, side="right").astype(np.int32)
+
+    segments_before_merge = int(len(np.unique(labels)))
+    labels, small_merges = merge_small_temporal_segments(
+        labels, stage, weights, min_cells, min_metacells)
+    labels, median_splits = split_wide_temporal_segments(
+        labels, stage, weights, max_span, min_cells, min_metacells)
+    diagnostics = {
+        "stage_min": stage_min,
+        "stage_max": stage_max,
+        "stage_span": stage_max - stage_min,
+        "n_unique_stage_values": int(len(np.unique(stage))),
+        "n_kde_peaks": int(peak_count),
+        "n_accepted_valleys": int(len(accepted_valleys)),
+        "accepted_valley_stages": json.dumps(accepted_valleys),
+        "n_segments_before_small_merge": segments_before_merge,
+        "n_small_segment_merges": int(small_merges),
+        "n_weighted_median_splits": int(median_splits),
+        "n_segments_final": int(len(np.unique(labels))),
+    }
+    return labels, diagnostics
+
+
+def make_kde_temporal_nodes(state_id, stage, weights, bandwidth,
+                            min_peak_distance, valley_ratio, max_span,
+                            min_cells, min_metacells):
+    """Adaptively split every state and return globally contiguous node IDs."""
+    state_id = np.asarray(state_id, dtype=np.int32)
+    stage = np.asarray(stage, dtype=np.float64)
+    weights = np.asarray(weights, dtype=np.float64)
+    segment = np.full(len(stage), -1, dtype=np.int32)
+    interval_left = np.full(len(stage), np.nan, dtype=np.float64)
+    interval_right = np.full(len(stage), np.nan, dtype=np.float64)
+    diagnostic_rows = []
+    for state in np.unique(state_id):
+        members = np.flatnonzero(state_id == state)
+        local_labels, diagnostics = kde_temporal_segments(
+            stage[members], weights[members], bandwidth,
+            min_peak_distance, valley_ratio, max_span,
+            min_cells, min_metacells)
+        segment[members] = local_labels
+        for label in np.unique(local_labels):
+            local_members = members[local_labels == label]
+            left = float(stage[local_members].min())
+            right = float(stage[local_members].max())
+            interval_left[local_members] = left
+            interval_right[local_members] = right
+        diagnostics.update(
+            state_id=int(state),
+            n_metacells=int(len(members)),
+            n_cells=int(weights[members].sum()))
+        diagnostic_rows.append(diagnostics)
+    if np.any(segment < 0) or not np.isfinite(interval_left).all():
+        raise RuntimeError("Adaptive temporal segmentation left metacells unassigned")
+    pairs = pd.MultiIndex.from_arrays([state_id, segment])
+    node_id, _ = pd.factorize(pairs, sort=True)
+    return (segment, node_id.astype(np.int32), interval_left,
+            interval_right, pd.DataFrame(diagnostic_rows))
 
 
 def composition(group, category, weights, group_name, category_name):
@@ -346,6 +563,23 @@ def main(argv=None):
             or args.min_node_cells < 1):
         raise ValueError(
             "Invalid kNN, Leiden, node-support, thread, or plotting parameter")
+    if args.temporal_split_method == "kde":
+        if (args.stage_kde_bandwidth <= 0
+                or not np.isfinite(args.stage_kde_bandwidth)):
+            raise ValueError("--stage-kde-bandwidth must be positive and finite")
+        if (args.stage_min_peak_distance <= 0
+                or not np.isfinite(args.stage_min_peak_distance)):
+            raise ValueError(
+                "--stage-min-peak-distance must be positive and finite")
+        if (not 0 <= args.stage_valley_ratio <= 1
+                or not np.isfinite(args.stage_valley_ratio)):
+            raise ValueError("--stage-valley-ratio must be within [0, 1]")
+        if (args.max_node_stage_span < 0
+                or not np.isfinite(args.max_node_stage_span)):
+            raise ValueError(
+                "--max-node-stage-span must be finite and nonnegative")
+        if args.min_segment_metacells < 1:
+            raise ValueError("--min-segment-metacells must be positive")
     root, output = args.input_dir.resolve(), args.output_dir.resolve()
     if output.exists() and any(output.iterdir()):
         raise FileExistsError(f"Output directory is not empty: {output}")
@@ -354,21 +588,56 @@ def main(argv=None):
     state_local, state_id, graph_summary = discover_lineage_states(
         metadata, embedding, args.knn, args.leiden_resolution,
         args.leiden_iterations, args.threads, args.seed)
-    stage_bin, node_id = make_temporal_nodes(
-        state_id, metadata.mean_stage.to_numpy(), args.stage_bin_width)
+    stage_values = metadata.mean_stage.to_numpy(dtype=np.float64)
+    split_diagnostics = pd.DataFrame()
+    if args.temporal_split_method == "fixed":
+        stage_bin, node_id = make_temporal_nodes(
+            state_id, stage_values, args.stage_bin_width)
+        temporal_segment = stage_bin
+        interval_left = stage_bin * args.stage_bin_width
+        interval_right = (stage_bin + 1) * args.stage_bin_width
+    else:
+        (temporal_segment, node_id, interval_left, interval_right,
+         split_diagnostics) = make_kde_temporal_nodes(
+             state_id, stage_values, metadata.n_cells.to_numpy(dtype=np.float64),
+             args.stage_kde_bandwidth, args.stage_min_peak_distance,
+             args.stage_valley_ratio, args.max_node_stage_span,
+             args.min_node_cells, args.min_segment_metacells)
+
     assignment = metadata.copy()
     assignment["state_within_lineage"] = state_local
     assignment["state_id"] = state_id
-    assignment["predicted_stage_bin"] = stage_bin
-    assignment["stage_bin_left"] = stage_bin * args.stage_bin_width
-    assignment["stage_bin_right"] = (stage_bin + 1) * args.stage_bin_width
+    assignment["temporal_segment_within_state"] = temporal_segment
+    assignment["temporal_interval_left"] = interval_left
+    assignment["temporal_interval_right"] = interval_right
+    if args.temporal_split_method == "fixed":
+        assignment["predicted_stage_bin"] = stage_bin
+        assignment["stage_bin_left"] = interval_left
+        assignment["stage_bin_right"] = interval_right
     assignment["node_id"] = node_id
     states = summarize_groups(assignment, "state_id")
     nodes = summarize_groups(assignment, "node_id")
-    nodes["predicted_stage_bin"] = nodes.node_id.map(
-        assignment.groupby("node_id").predicted_stage_bin.first())
-    nodes["stage_bin_left"] = nodes.predicted_stage_bin * args.stage_bin_width
-    nodes["stage_bin_right"] = (nodes.predicted_stage_bin + 1) * args.stage_bin_width
+    first_by_node = assignment.groupby("node_id", sort=True).first()
+    nodes["temporal_segment_within_state"] = nodes.node_id.map(
+        first_by_node.temporal_segment_within_state)
+    nodes["temporal_interval_left"] = nodes.node_id.map(
+        first_by_node.temporal_interval_left)
+    nodes["temporal_interval_right"] = nodes.node_id.map(
+        first_by_node.temporal_interval_right)
+    if args.temporal_split_method == "fixed":
+        nodes["predicted_stage_bin"] = nodes.node_id.map(
+            first_by_node.predicted_stage_bin)
+        nodes["stage_bin_left"] = nodes.temporal_interval_left
+        nodes["stage_bin_right"] = nodes.temporal_interval_right
+    else:
+        state_annotations = (
+            assignment.groupby("state_id", sort=True)
+            .agg(lineage=("lineage", "first"),
+                 state_within_lineage=("state_within_lineage", "first"))
+            .reset_index())
+        split_diagnostics = split_diagnostics.merge(
+            state_annotations, on="state_id", how="left",
+            validate="one_to_one")
     states, nodes, state_comp, node_comp = attach_exact_celltype_purity(
         root, assignment, states, nodes)
     raw_node_count = len(nodes)
@@ -384,6 +653,9 @@ def main(argv=None):
     nodes.to_parquet(output / "nodes.parquet", index=False)
     filtered_nodes.to_parquet(output / "filtered_small_nodes.parquet", index=False)
     graph_summary.to_csv(output / "lineage_knn_summary.csv", index=False)
+    if not split_diagnostics.empty:
+        split_diagnostics.to_parquet(
+            output / "temporal_split_diagnostics.parquet", index=False)
     if not state_comp.empty:
         state_comp.to_parquet(output / "state_celltype_composition.parquet", index=False)
         node_comp.to_parquet(output / "node_celltype_composition.parquet", index=False)
@@ -416,9 +688,20 @@ def main(argv=None):
         "median_node_metacells": float(nodes.n_metacells.median()),
         "min_node_metacells": int(nodes.n_metacells.min()),
         "max_node_metacells": int(nodes.n_metacells.max()),
+        "median_node_stage_span": float(
+            (nodes.max_stage - nodes.min_stage).median()),
+        "max_node_stage_span_observed": float(
+            (nodes.max_stage - nodes.min_stage).max()),
         "clustering_inputs": "embedding only, independently within each known lineage",
-        "predicted_stage_usage": "post-Leiden temporal subdivision only",
-        "node_support_filter": "n_cells >= min_node_cells; celltype-independent",
+        "temporal_split_method": args.temporal_split_method,
+        "predicted_stage_usage": (
+            "post-Leiden fixed-width temporal subdivision"
+            if args.temporal_split_method == "fixed"
+            else "post-Leiden cell-weighted KDE valleys plus broad-segment median splitting"),
+        "node_support_filter": (
+            "adaptive small segments are merged first; final n_cells >= min_node_cells"
+            if args.temporal_split_method == "kde"
+            else "n_cells >= min_node_cells; celltype-independent"),
         "filtered_assignment": "node_id=-1 with raw_node_id retained",
         "celltype_usage": "post-clustering evaluation only",
         "node_connections_constructed": False,
