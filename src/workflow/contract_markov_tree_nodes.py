@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Contract redundant degree-two nodes after a Markov tree has been built.
+"""Contract redundant nodes after a Markov tree has been built.
 
-Only consecutive temporal nodes on nonbranching paths may be merged. Lineage
-roots remain singleton anchors. A degree-two chain may absorb its downstream
-branch point or terminal node while preserving the rooted branching topology.
-Merge decisions use node embeddings and stage span only; cell-type labels are
-aggregated afterwards for evaluation and plots.
+Consecutive temporal nodes on nonbranching paths may be merged. Optionally,
+similar siblings may also merge when they share a real parent, are close in
+embedding and mean stage, and at least one sibling is a leaf. Lineage roots
+remain singleton anchors. Merge decisions never use cell-type labels; those
+labels are aggregated afterwards for evaluation and plots.
 """
 from __future__ import annotations
 
@@ -42,6 +42,15 @@ def parse_args(argv=None):
     parser.add_argument(
         "--max-stage-span", type=float, default=6.0,
         help="Largest allowed max_stage-min_stage across a contracted node.")
+    parser.add_argument(
+        "--merge-siblings", action="store_true",
+        help="After path contraction, iteratively merge eligible sibling nodes.")
+    parser.add_argument(
+        "--sibling-max-cosine-distance", type=float, default=0.20,
+        help="Largest cosine distance between sibling group centroids.")
+    parser.add_argument(
+        "--sibling-max-stage-gap", type=float, default=1.0,
+        help="Largest cell-weighted mean-stage difference between siblings.")
     parser.add_argument("--dpi", type=int, default=220)
     parser.add_argument(
         "--plots-only", action="store_true",
@@ -206,6 +215,149 @@ def make_groups(real_nodes, embeddings, parents, children,
         min(float(lookup.at[node, "cell_weighted_mean_stage"]) for node in group),
         min(group)))
     return groups, chains, anchors
+
+
+def contracted_group_adjacency(groups, real_edges):
+    """Build the real-node tree induced by a partition of source nodes."""
+    old_to_group = {
+        int(old): group_id
+        for group_id, group in enumerate(groups)
+        for old in group
+    }
+    parents = defaultdict(set)
+    children = defaultdict(set)
+    for edge in real_edges.itertuples(index=False):
+        parent = old_to_group[int(edge.parent_id)]
+        child = old_to_group[int(edge.child_id)]
+        if parent != child:
+            parents[child].add(parent)
+            children[parent].add(child)
+    for group_id in range(len(groups)):
+        if len(parents[group_id]) > 1:
+            raise RuntimeError(
+                f"Contracted group {group_id} has multiple real parents")
+    return parents, children
+
+
+def group_statistics(group, lookup, embeddings):
+    """Return a cell-weighted unit centroid and mean stage for a source group."""
+    frame = lookup.loc[group]
+    weights = frame.n_cells.to_numpy(dtype=np.float64)
+    centroid = np.average(embeddings[group], axis=0, weights=weights)
+    norm = np.linalg.norm(centroid)
+    if not np.isfinite(norm) or norm <= 0:
+        raise RuntimeError("A sibling candidate has an invalid embedding centroid")
+    stage = float(np.average(
+        frame.cell_weighted_mean_stage.to_numpy(dtype=np.float64),
+        weights=weights))
+    lineage = str(frame.lineage.iloc[0])
+    if not frame.lineage.astype(str).eq(lineage).all():
+        raise RuntimeError("A contracted group crosses lineage boundaries")
+    return centroid / norm, stage, lineage
+
+
+def merge_sibling_groups(groups, real_nodes, embeddings, real_edges,
+                         max_distance, max_stage_gap):
+    """Iteratively merge close siblings, processing deeper parents first.
+
+    Eligible groups share a real temporal-node parent, belong to the same
+    lineage, differ by at most max_stage_gap in cell-weighted mean stage, and
+    have cosine distance at most max_distance. At least one group must be a
+    leaf. Real lineage roots are never candidates because virtual-root edges
+    are absent from real_edges.
+    """
+    lookup = real_nodes.set_index("node_id")
+    groups = [list(group) for group in groups]
+    history = []
+    while True:
+        parents, children = contracted_group_adjacency(groups, real_edges)
+        roots = [group_id for group_id in range(len(groups)) if not parents[group_id]]
+        depth = {group_id: 0 for group_id in roots}
+        stack = list(roots)
+        while stack:
+            parent = stack.pop()
+            for child in children[parent]:
+                candidate_depth = depth[parent] + 1
+                if candidate_depth > depth.get(child, -1):
+                    depth[child] = candidate_depth
+                    stack.append(child)
+
+        stats = {
+            group_id: group_statistics(group, lookup, embeddings)
+            for group_id, group in enumerate(groups)
+        }
+        candidates = []
+        for parent, sibling_set in children.items():
+            siblings = sorted(sibling_set)
+            if len(siblings) < 2:
+                continue
+            for left_position, left in enumerate(siblings):
+                for right in siblings[left_position + 1:]:
+                    if children[left] and children[right]:
+                        continue
+                    left_embedding, left_stage, left_lineage = stats[left]
+                    right_embedding, right_stage, right_lineage = stats[right]
+                    if left_lineage != right_lineage:
+                        continue
+                    stage_gap = abs(left_stage - right_stage)
+                    if stage_gap > max_stage_gap:
+                        continue
+                    distance = max(
+                        0.0, 1.0 - float(left_embedding @ right_embedding))
+                    if distance > max_distance:
+                        continue
+
+                    merged = groups[left] + groups[right]
+                    _, merged_stage, _ = group_statistics(
+                        merged, lookup, embeddings)
+                    parent_stage = stats[parent][1]
+                    downstream = (children[left] | children[right]) - {left, right}
+                    if merged_stage <= parent_stage:
+                        continue
+                    if any(merged_stage >= stats[child][1] for child in downstream):
+                        continue
+                    candidates.append((
+                        -depth.get(parent, 0), distance, stage_gap,
+                        min(groups[left]), min(groups[right]),
+                        parent, left, right, merged_stage,
+                    ))
+        if not candidates:
+            break
+
+        (_, distance, stage_gap, _, _, parent, left, right,
+         merged_stage) = min(candidates)
+        left_group, right_group = groups[left], groups[right]
+        merged_group = sorted(
+            left_group + right_group,
+            key=lambda node: (
+                float(lookup.at[node, "cell_weighted_mean_stage"]), int(node)))
+        history.append({
+            "merge_order": len(history) + 1,
+            "parent_source_node_ids": [int(value) for value in groups[parent]],
+            "left_source_node_ids": [int(value) for value in left_group],
+            "right_source_node_ids": [int(value) for value in right_group],
+            "cosine_distance": float(distance),
+            "mean_stage_gap": float(stage_gap),
+            "merged_mean_stage": float(merged_stage),
+            "left_was_leaf": not bool(children[left]),
+            "right_was_leaf": not bool(children[right]),
+        })
+        groups[left] = merged_group
+        del groups[right]
+
+    groups.sort(key=lambda group: (
+        str(lookup.at[group[0], "lineage"]),
+        min(float(lookup.at[node, "cell_weighted_mean_stage"]) for node in group),
+        min(group)))
+    covered = [node for group in groups for node in group]
+    if len(covered) != len(set(covered)) or set(covered) != set(real_nodes.node_id):
+        raise RuntimeError("Sibling merging no longer partitions temporal nodes")
+    history_columns = [
+        "merge_order", "parent_source_node_ids", "left_source_node_ids",
+        "right_source_node_ids", "cosine_distance", "mean_stage_gap",
+        "merged_mean_stage", "left_was_leaf", "right_was_leaf",
+    ]
+    return groups, pd.DataFrame(history, columns=history_columns)
 
 
 def aggregate_composition(groups, composition):
@@ -545,6 +697,13 @@ def main(argv=None):
         raise ValueError("--max-cosine-distance must be finite and nonnegative")
     if args.max_stage_span <= 0 or not np.isfinite(args.max_stage_span):
         raise ValueError("--max-stage-span must be positive and finite")
+    if (args.sibling_max_cosine_distance < 0
+            or not np.isfinite(args.sibling_max_cosine_distance)):
+        raise ValueError(
+            "--sibling-max-cosine-distance must be finite and nonnegative")
+    if (args.sibling_max_stage_gap < 0
+            or not np.isfinite(args.sibling_max_stage_gap)):
+        raise ValueError("--sibling-max-stage-gap must be finite and nonnegative")
     source_tree = args.tree_dir.resolve()
     source_nodes = args.node_dir.resolve()
     output = args.output_dir.resolve()
@@ -579,10 +738,23 @@ def main(argv=None):
         args.tree_dir, args.node_dir = source_tree, source_nodes
         log("loading source tree, embeddings, and cell-type compositions")
         old_nodes, old_edges, real, embeddings, composition = load_inputs(args)
-        parents, children, _ = real_tree_adjacency(real, old_edges)
+        parents, children, real_edges = real_tree_adjacency(real, old_edges)
         groups, chains, anchors = make_groups(
             real, embeddings, parents, children,
             args.max_cosine_distance, args.max_stage_span)
+        chain_groups = [list(group) for group in groups]
+        sibling_history = pd.DataFrame(columns=[
+            "merge_order", "parent_source_node_ids", "left_source_node_ids",
+            "right_source_node_ids", "cosine_distance", "mean_stage_gap",
+            "merged_mean_stage", "left_was_leaf", "right_was_leaf",
+        ])
+        if args.merge_siblings:
+            log("merging close sibling nodes")
+            groups, sibling_history = merge_sibling_groups(
+                groups, real, embeddings, real_edges,
+                args.sibling_max_cosine_distance,
+                args.sibling_max_stage_gap)
+            log(f"sibling merges: {len(sibling_history):,}")
         contracted_composition, old_to_new = aggregate_composition(groups, composition)
         contracted_real, contracted_embeddings, membership = aggregate_real_nodes(
             groups, real, embeddings, contracted_composition)
@@ -593,8 +765,17 @@ def main(argv=None):
 
         before = topology_counts(old_nodes, old_edges)
         after = topology_counts(nodes, edges)
-        if before != after:
+        if not args.merge_siblings and before != after:
             raise RuntimeError(f"Branch topology changed: before={before}, after={after}")
+        if args.merge_siblings:
+            if after["n_lineage_roots"] != before["n_lineage_roots"]:
+                raise RuntimeError(
+                    f"Sibling merging changed lineage roots: before={before}, after={after}")
+            if (after["n_branch_points"] > before["n_branch_points"]
+                    or after["n_terminal_nodes"] > before["n_terminal_nodes"]):
+                raise RuntimeError(
+                    f"Sibling merging increased tree complexity: "
+                    f"before={before}, after={after}")
         if int(nodes.loc[nodes.node_type.eq("temporal_node"), "n_cells"].sum()) != int(real.n_cells.sum()):
             raise RuntimeError("Cell count changed during contraction")
         if int(nodes.loc[nodes.node_type.eq("temporal_node"), "n_metacells"].sum()) != int(real.n_metacells.sum()):
@@ -603,23 +784,33 @@ def main(argv=None):
         nodes.to_parquet(temporary / "tree_nodes.parquet", index=False)
         edges.to_parquet(temporary / "tree_edges.parquet", index=False)
         membership.to_parquet(temporary / "source_to_contracted_nodes.parquet", index=False)
+        if args.merge_siblings:
+            sibling_history.to_parquet(
+                temporary / "sibling_merge_history.parquet", index=False)
         contracted_composition.to_parquet(
             temporary / "node_celltype_composition.parquet", index=False)
         np.save(temporary / "node_embeddings.npy", contracted_embeddings)
         group_sizes = np.asarray([len(group) for group in groups])
         stage_spans = contracted_real.max_stage - contracted_real.min_stage
-        merged_anchors = {
-            node for group in groups if len(group) > 1
+        chain_merged_anchors = {
+            node for group in chain_groups if len(group) > 1
             for node in group if node in anchors
         }
         summary = {
             "n_source_temporal_nodes": int(len(real)),
             "n_contracted_temporal_nodes": int(len(contracted_real)),
             "n_nodes_removed": int(len(real) - len(contracted_real)),
+            "n_nodes_removed_by_path_contraction": int(len(real) - len(chain_groups)),
+            "n_nodes_removed_by_sibling_merge": int(len(sibling_history)),
             "n_source_nonbranching_chains": int(len(chains)),
             "n_structural_anchor_nodes": int(len(anchors)),
-            "n_fixed_anchor_nodes": int(len(anchors) - len(merged_anchors)),
-            "n_anchors_merged_with_upstream_degree_two": int(len(merged_anchors)),
+            "n_fixed_anchor_nodes": int(
+                len(anchors) - len(chain_merged_anchors)),
+            "n_fixed_anchor_nodes_after_path_contraction": int(
+                len(anchors) - len(chain_merged_anchors)),
+            "n_anchors_merged_with_upstream_degree_two": int(
+                len(chain_merged_anchors)),
+            "n_sibling_merges": int(len(sibling_history)),
             "n_merged_contracted_nodes": int(np.count_nonzero(group_sizes > 1)),
             "max_source_nodes_per_contracted_node": int(group_sizes.max()),
             "median_source_nodes_per_contracted_node": float(np.median(group_sizes)),
@@ -627,11 +818,20 @@ def main(argv=None):
             "max_contracted_stage_span": float(stage_spans.max()),
             "max_cosine_distance": float(args.max_cosine_distance),
             "max_stage_span": float(args.max_stage_span),
+            "merge_siblings": bool(args.merge_siblings),
+            "sibling_max_cosine_distance": float(
+                args.sibling_max_cosine_distance),
+            "sibling_max_stage_gap": float(args.sibling_max_stage_gap),
+            "sibling_leaf_requirement": "at least one sibling must be a leaf",
             "topology_before": before,
             "topology_after": after,
-            "topology_preserved": True,
-            "protected_nodes": "lineage roots and anchor-to-anchor edges; branch points and terminal nodes may absorb an upstream degree-two chain",
-            "merge_inputs": "node embedding and stage span only",
+            "topology_preserved": before == after,
+            "topology_simplified_by_sibling_merging": before != after,
+            "protected_nodes": (
+                "lineage roots remain protected; path contraction protects "
+                "anchor-to-anchor edges; optional sibling merging changes only "
+                "siblings below a real temporal-node parent"),
+            "merge_inputs": "node embedding and stage only",
             "celltype_usage": "post-contraction aggregation and plotting only",
             "markov_probabilities": "not recomputed; output represents the contracted tree topology",
         }

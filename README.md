@@ -169,7 +169,7 @@ Nearest-earlier-node fallback edges ensure reachability when a node has no valid
 
 ### 4. Contract redundant tree nodes
 
-Only nodes along nonbranching paths can merge. Lineage roots and anchor-to-anchor edges are protected. Merge decisions use embedding distance and cell-level stage span only.
+By default, only nodes along nonbranching paths can merge. Lineage roots and anchor-to-anchor edges are protected. Merge decisions use embedding distance and stage only.
 
 ```bash
 python src/workflow/contract_markov_tree_nodes.py \
@@ -181,11 +181,27 @@ python src/workflow/contract_markov_tree_nodes.py \
   --dpi 220
 ```
 
+Optional topology-simplifying sibling merging runs after path contraction. Two siblings may merge when they share a real temporal-node parent, have cosine distance at most 0.20 and mean-stage gap at most 1.0, and at least one is a leaf. Direct children of lineage virtual roots are not merged.
+
+```bash
+python src/workflow/contract_markov_tree_nodes.py \
+  --tree-dir results/markov_tree \
+  --node-dir results/trajectory_nodes \
+  --output-dir results/contracted_tree_with_siblings \
+  --max-cosine-distance 0.15 \
+  --max-stage-span 8 \
+  --merge-siblings \
+  --sibling-max-cosine-distance 0.20 \
+  --sibling-max-stage-gap 1.0 \
+  --dpi 220
+```
+
 Principal outputs:
 
 - `tree_nodes.parquet` and `tree_edges.parquet`: final topology;
 - `node_embeddings.npy`: cell-count-weighted contracted embeddings;
 - `source_to_contracted_nodes.parquet`: exact old-to-new mapping;
+- `sibling_merge_history.parquet`: ordered sibling-merge audit trail when enabled;
 - `node_celltype_composition.parquet`: post-contraction annotation;
 - plots, `summary.json`, and `run_config.json`.
 
