@@ -215,6 +215,7 @@ python src/workflow/contract_markov_tree_nodes.py \
   --merge-siblings \
   --sibling-max-cosine-distance 0.20 \
   --sibling-max-stage-gap 1.0 \
+  --mixed-celltype-purity-threshold 0.6 \
   --dpi 220
 ```
 
@@ -227,7 +228,7 @@ Principal outputs:
 - `node_celltype_composition.parquet`: post-contraction annotation;
 - plots, `summary.json`, and `run_config.json`.
 
-The script verifies the temporal-node partition and preserves total cell and microcell counts. Path contraction preserves protected structural anchors; optional sibling merging intentionally simplifies eligible local topology and records every event in `sibling_merge_history.parquet`. Markov probabilities are not recomputed after contraction.
+The script verifies the temporal-node partition and preserves total cell and microcell counts. Path contraction preserves protected structural anchors; optional sibling merging intentionally simplifies eligible local topology and records every event in `sibling_merge_history.parquet`. Markov probabilities are not recomputed after contraction. In cell-type plots, nodes below `--mixed-celltype-purity-threshold` are displayed as `Mixed`; this display rule does not alter the stored dominant cell type, composition, or tree topology.
 
 Regenerate plots without rerunning contraction:
 
@@ -238,6 +239,7 @@ python src/workflow/contract_markov_tree_nodes.py \
   --plots-only \
   --lineage-node-size 45 \
   --lineage-node-label-size 5 \
+  --mixed-celltype-purity-threshold 0.6 \
   --dpi 220
 ```
 

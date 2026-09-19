@@ -64,6 +64,9 @@ def parse_args(argv=None):
     parser.add_argument(
         "--lineage-node-label-size", type=float, default=5.0,
         help="Font size for contracted node_id labels in per-lineage trees.")
+    parser.add_argument(
+        "--mixed-celltype-purity-threshold", type=float, default=0.6,
+        help="Display temporal nodes below this dominant-celltype purity as Mixed.")
     return parser.parse_args(argv)
 
 
@@ -642,7 +645,8 @@ def discrete_colors(size, matplotlib):
 
 
 def plot_outputs(nodes, edges, output, source_tree_dir, dpi,
-                 lineage_node_size=45.0, lineage_node_label_size=5.0):
+                 lineage_node_size=45.0, lineage_node_label_size=5.0,
+                 mixed_celltype_purity_threshold=0.6):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -655,7 +659,11 @@ def plot_outputs(nodes, edges, output, source_tree_dir, dpi,
     lineage_palette = dict(zip(
         lineages, plt.get_cmap("tab20")(np.linspace(0, 1, len(lineages)))))
 
-    labels = nodes.loc[real, "dominant_celltype"].astype(str)
+    labels = nodes.loc[real, "dominant_celltype"].astype(str).copy()
+    labels.loc[
+        nodes.loc[real, "celltype_purity"].astype(float)
+        < mixed_celltype_purity_threshold
+    ] = "Mixed"
     weights = (nodes.loc[real].assign(_label=labels)
                .groupby("_label", sort=False).n_cells.sum().sort_values(ascending=False))
     celltypes = weights.index.tolist()
@@ -665,6 +673,8 @@ def plot_outputs(nodes, edges, output, source_tree_dir, dpi,
         table = pd.read_csv(source_colors)
         if {"celltype", "color"}.issubset(table):
             colors.update(dict(zip(table.celltype.astype(str), table.color.astype(str))))
+    if "Mixed" in celltypes:
+        colors["Mixed"] = "#9E9E9E"
     missing = [label for label in celltypes if label not in colors]
     for color in discrete_colors(len(celltypes) + len(colors), matplotlib):
         if not missing:
@@ -723,7 +733,7 @@ def plot_outputs(nodes, edges, output, source_tree_dir, dpi,
               fontsize=6, ncol=min(8, max(1, len(celltypes))), markerscale=1.5,
               columnspacing=.8, handletextpad=.3)
     ax.set(xlabel="Cell-weighted predicted stage", ylabel="Lineage-separated branch layout",
-           title=f"Contracted Markov tree — all {len(celltypes)} dominant cell types")
+           title=f"Contracted Markov tree — all {len(celltypes)} cell-type labels")
     ax.set_yticks(np.arange(len(lineages)) + .5, lineages, fontsize=8)
     ax.grid(axis="x", color="#EEEEEE", linewidth=.5)
     save(fig, "tree_by_dominant_celltype")
@@ -732,7 +742,11 @@ def plot_outputs(nodes, edges, output, source_tree_dir, dpi,
     lineage_output.mkdir(exist_ok=True)
     for position, lineage in enumerate(lineages, 1):
         mask = real & nodes.lineage.eq(lineage)
-        local_labels = nodes.loc[mask, "dominant_celltype"].astype(str)
+        local_labels = nodes.loc[mask, "dominant_celltype"].astype(str).copy()
+        local_labels.loc[
+            nodes.loc[mask, "celltype_purity"].astype(float)
+            < mixed_celltype_purity_threshold
+        ] = "Mixed"
         local_types = [label for label in celltypes if label in set(local_labels)]
         legend_columns = max(1, math.ceil(len(local_types) / 30))
         fig, ax = plt.subplots(figsize=(12 + 3 * legend_columns, 8))
@@ -819,6 +833,10 @@ def main(argv=None):
     if (args.lineage_node_label_size <= 0
             or not np.isfinite(args.lineage_node_label_size)):
         raise ValueError("--lineage-node-label-size must be positive and finite")
+    if (not 0 <= args.mixed_celltype_purity_threshold <= 1
+            or not np.isfinite(args.mixed_celltype_purity_threshold)):
+        raise ValueError(
+            "--mixed-celltype-purity-threshold must be within [0, 1]")
     if args.plots_only:
         if not output.is_dir():
             raise FileNotFoundError(
@@ -833,7 +851,8 @@ def main(argv=None):
         plot_nodes = tree_layout(pd.read_parquet(node_path), plot_edges)
         plot_outputs(
             plot_nodes, plot_edges, output, source_tree, args.dpi,
-            args.lineage_node_size, args.lineage_node_label_size)
+            args.lineage_node_size, args.lineage_node_label_size,
+            args.mixed_celltype_purity_threshold)
         log(f"plots updated: {output}")
         return
     temporary = output.with_name(f".{output.name}.building")
@@ -965,6 +984,8 @@ def main(argv=None):
                 "siblings below a real temporal-node parent"),
             "merge_inputs": "node embedding and stage only",
             "celltype_usage": "post-contraction aggregation and plotting only",
+            "mixed_celltype_purity_threshold": float(
+                args.mixed_celltype_purity_threshold),
             "markov_probabilities": "not recomputed; output represents the contracted tree topology",
         }
         (temporary / "summary.json").write_text(
@@ -975,7 +996,8 @@ def main(argv=None):
             json.dumps(config, indent=2, ensure_ascii=False) + "\n")
         plot_outputs(
             nodes, edges, temporary, source_tree, args.dpi,
-            args.lineage_node_size, args.lineage_node_label_size)
+            args.lineage_node_size, args.lineage_node_label_size,
+            args.mixed_celltype_purity_threshold)
         (temporary / "complete.json").write_text(json.dumps({"complete": True}) + "\n")
         temporary.rename(output)
         log(f"done: {output}")
