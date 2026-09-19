@@ -653,6 +653,20 @@ def plot_outputs(nodes, edges, output, source_tree_dir, dpi,
     import matplotlib.patheffects as path_effects
     from matplotlib.lines import Line2D
 
+    plt.rcParams.update({
+        "font.size": 10,
+        "axes.titlesize": 15,
+        "axes.titleweight": "semibold",
+        "axes.labelsize": 11,
+        "axes.edgecolor": "#C7CDD4",
+        "axes.linewidth": .8,
+        "xtick.color": "#4D5660",
+        "ytick.color": "#4D5660",
+        "text.color": "#27313A",
+        "pdf.fonttype": 42,
+        "ps.fonttype": 42,
+    })
+
     real = nodes.node_type.eq("temporal_node")
     lookup = nodes.set_index("node_id")
     lineages = sorted(nodes.loc[real, "lineage"].astype(str).unique())
@@ -682,6 +696,31 @@ def plot_outputs(nodes, edges, output, source_tree_dir, dpi,
         if color not in set(colors.values()):
             colors[missing.pop(0)] = color
 
+    def scaled_sizes(frame, low, high):
+        abundance = np.log1p(frame["n_cells"].astype(float).to_numpy())
+        if len(abundance) == 0 or np.ptp(abundance) == 0:
+            return np.full(len(abundance), (low + high) / 2)
+        return low + (
+            (abundance - abundance.min()) / np.ptp(abundance) * (high - low))
+
+    overall_nodes = nodes.loc[real]
+    overall_size_by_id = dict(zip(
+        overall_nodes["node_id"].astype(int), scaled_sizes(overall_nodes, 9, 34)))
+
+    def style_overall_axis(ax, title):
+        ax.set_facecolor("white")
+        ax.set_xlabel("Cell-weighted predicted stage")
+        ax.set_ylabel("Lineage-separated branch layout")
+        ax.set_title(title, loc="left", pad=14)
+        ax.text(
+            1, 1.012, "Early to late, left to right",
+            transform=ax.transAxes, ha="right", va="bottom",
+            fontsize=9, color="#69737D")
+        ax.set_yticks(np.arange(len(lineages)) + .5, lineages, fontsize=8)
+        ax.grid(axis="x", color="#E8ECEF", linewidth=.6, zorder=0)
+        ax.spines[["top", "right"]].set_visible(False)
+        ax.margins(x=.025)
+
     def draw_edges(ax, selected):
         for edge in selected.itertuples(index=False):
             ax.plot(
@@ -689,105 +728,182 @@ def plot_outputs(nodes, edges, output, source_tree_dir, dpi,
                  lookup.at[edge.child_id, "tree_stage"]],
                 [lookup.at[edge.parent_id, "tree_x"],
                  lookup.at[edge.child_id, "tree_x"]],
-                color="#999999", linewidth=.45, alpha=.5, zorder=1)
+                color="#AAB4BE", linewidth=.55, alpha=.48, zorder=1,
+                solid_capstyle="round")
+
+    def draw_overall_roots(ax):
+        virtual = ~real
+        ax.scatter(
+            nodes.loc[virtual, "tree_stage"], nodes.loc[virtual, "tree_x"],
+            marker="*", s=70, color="#182026", edgecolors="white",
+            linewidths=.45, zorder=4)
 
     def save(fig, name):
-        fig.savefig(output / f"{name}.png", dpi=dpi, bbox_inches="tight")
-        fig.savefig(output / f"{name}.pdf", bbox_inches="tight")
+        fig.patch.set_facecolor("#F6F8FA")
+        fig.savefig(output / f"{name}.png", dpi=dpi, bbox_inches="tight",
+                    facecolor=fig.get_facecolor())
+        fig.savefig(output / f"{name}.pdf", bbox_inches="tight",
+                    facecolor=fig.get_facecolor())
         plt.close(fig)
 
-    fig, ax = plt.subplots(figsize=(17, 13))
+    fig, ax = plt.subplots(figsize=(17, 12.5))
     draw_edges(ax, edges)
     for lineage in lineages:
         mask = real & nodes.lineage.eq(lineage)
-        ax.scatter(nodes.loc[mask, "tree_stage"], nodes.loc[mask, "tree_x"],
-                   s=10, color=lineage_palette[lineage], linewidths=0, zorder=2)
-    virtual = ~real
-    ax.scatter(nodes.loc[virtual, "tree_stage"], nodes.loc[virtual, "tree_x"],
-               marker="*", s=55, color="black", zorder=3)
-    ax.set(xlabel="Cell-weighted predicted stage", ylabel="Lineage-separated branch layout",
-           title="Contracted Markov tree — lineage (early to late, left to right)")
-    ax.set_yticks(np.arange(len(lineages)) + .5, lineages, fontsize=8)
-    ax.grid(axis="x", color="#EEEEEE", linewidth=.5)
+        lineage_nodes = nodes.loc[mask]
+        ax.scatter(
+            lineage_nodes["tree_stage"], lineage_nodes["tree_x"],
+            s=[overall_size_by_id[int(node_id)]
+               for node_id in lineage_nodes["node_id"]],
+            color=lineage_palette[lineage], edgecolors="white",
+            linewidths=.25, zorder=2)
+    draw_overall_roots(ax)
+    style_overall_axis(ax, "Contracted developmental atlas: lineage structure")
+    ax.text(
+        .01, -.055, "Node area scales with cell abundance",
+        transform=ax.transAxes, ha="left", va="top",
+        fontsize=8.5, color="#69737D")
     save(fig, "tree_by_lineage")
 
-    fig, ax = plt.subplots(figsize=(17, 13))
+    fig, ax = plt.subplots(figsize=(17, 12.5))
     draw_edges(ax, edges)
-    points = ax.scatter(nodes.loc[real, "tree_stage"], nodes.loc[real, "tree_x"],
-                        c=nodes.loc[real, "tree_stage"], cmap="viridis", s=10,
-                        linewidths=0, zorder=2)
-    fig.colorbar(points, ax=ax, label="Cell-weighted predicted stage")
-    ax.set(xlabel="Cell-weighted predicted stage", ylabel="Lineage-separated branch layout",
-           title="Contracted Markov tree — stage (early to late, left to right)")
-    ax.set_yticks(np.arange(len(lineages)) + .5, lineages, fontsize=8)
-    ax.grid(axis="x", color="#EEEEEE", linewidth=.5)
+    points = ax.scatter(
+        overall_nodes["tree_stage"], overall_nodes["tree_x"],
+        c=overall_nodes["tree_stage"], cmap="viridis",
+        s=[overall_size_by_id[int(node_id)]
+           for node_id in overall_nodes["node_id"]],
+        edgecolors="white", linewidths=.2, zorder=2)
+    draw_overall_roots(ax)
+    colorbar = fig.colorbar(points, ax=ax, pad=.018, fraction=.025)
+    colorbar.set_label("Cell-weighted predicted stage")
+    colorbar.outline.set_edgecolor("#C7CDD4")
+    style_overall_axis(ax, "Contracted developmental atlas: temporal progression")
+    ax.text(
+        .01, -.055, "Node area scales with cell abundance",
+        transform=ax.transAxes, ha="left", va="top",
+        fontsize=8.5, color="#69737D")
     save(fig, "tree_by_stage")
 
-    fig, ax = plt.subplots(figsize=(18, 14))
+    fig, ax = plt.subplots(figsize=(18, 13))
     draw_edges(ax, edges)
-    ax.scatter(nodes.loc[real, "tree_stage"], nodes.loc[real, "tree_x"],
-               c=[colors[label] for label in labels], s=10, linewidths=0, zorder=2)
-    handles = [Line2D([0], [0], marker="o", linestyle="", color=colors[label], label=label)
-               for label in celltypes]
-    ax.legend(handles=handles, loc="upper center", bbox_to_anchor=(.5, -.08),
-              fontsize=6, ncol=min(8, max(1, len(celltypes))), markerscale=1.5,
-              columnspacing=.8, handletextpad=.3)
-    ax.set(xlabel="Cell-weighted predicted stage", ylabel="Lineage-separated branch layout",
-           title=f"Contracted Markov tree — all {len(celltypes)} cell-type labels")
-    ax.set_yticks(np.arange(len(lineages)) + .5, lineages, fontsize=8)
-    ax.grid(axis="x", color="#EEEEEE", linewidth=.5)
+    ax.scatter(
+        overall_nodes["tree_stage"], overall_nodes["tree_x"],
+        c=[colors[label] for label in labels],
+        s=[overall_size_by_id[int(node_id)]
+           for node_id in overall_nodes["node_id"]],
+        edgecolors="white", linewidths=.2, zorder=2)
+    draw_overall_roots(ax)
+    legend_types = celltypes[:24]
+    handles = [
+        Line2D(
+            [0], [0], marker="o", linestyle="", markerfacecolor=colors[label],
+            markeredgecolor="white", markeredgewidth=.3, color="none",
+            label=label, markersize=5.5)
+        for label in legend_types
+    ]
+    ax.legend(
+        handles=handles, loc="upper center", bbox_to_anchor=(.5, -.075),
+        fontsize=7.2, ncol=6, frameon=False, columnspacing=1.25,
+        handletextpad=.35, borderaxespad=0)
+    style_overall_axis(ax, "Contracted developmental atlas: dominant cell type")
+    legend_note = (
+        f"Top {len(legend_types)} of {len(celltypes)} labels by cell abundance; "
+        "complete palette in celltype_colors.csv")
+    ax.text(
+        .01, -.055, legend_note, transform=ax.transAxes,
+        ha="left", va="top", fontsize=8.5, color="#69737D")
     save(fig, "tree_by_dominant_celltype")
 
     lineage_output = output / "trees_by_lineage_celltype"
     lineage_output.mkdir(exist_ok=True)
     for position, lineage in enumerate(lineages, 1):
         mask = real & nodes.lineage.eq(lineage)
-        local_labels = nodes.loc[mask, "dominant_celltype"].astype(str).copy()
+        local_nodes = nodes.loc[mask]
+        local_labels = local_nodes["dominant_celltype"].astype(str).copy()
         local_labels.loc[
-            nodes.loc[mask, "celltype_purity"].astype(float)
+            local_nodes["celltype_purity"].astype(float)
             < mixed_celltype_purity_threshold
         ] = "Mixed"
-        local_types = [label for label in celltypes if label in set(local_labels)]
-        legend_columns = max(1, math.ceil(len(local_types) / 30))
-        fig, ax = plt.subplots(figsize=(12 + 3 * legend_columns, 8))
-        local_edges = edges[edges.lineage.eq(lineage) & edges.edge_kind.ne("global_root")]
+        local_weights = (
+            local_nodes.assign(_label=local_labels)
+            .groupby("_label", sort=False).n_cells.sum()
+            .sort_values(ascending=False))
+        local_types = local_weights.index.tolist()
+        legend_columns = max(1, math.ceil((len(local_types) + 1) / 14))
+        fig, ax = plt.subplots(figsize=(12.5 + 2.1 * legend_columns, 8.2))
+        fig.patch.set_facecolor("#F6F8FA")
+        ax.set_facecolor("white")
+        local_edges = edges[
+            edges.lineage.eq(lineage) & edges.edge_kind.ne("global_root")]
         for edge in local_edges.itertuples(index=False):
             ax.plot(
                 [lookup.at[edge.parent_id, "tree_x"],
                  lookup.at[edge.child_id, "tree_x"]],
                 [lookup.at[edge.parent_id, "tree_stage"],
                  lookup.at[edge.child_id, "tree_stage"]],
-                color="#999999", linewidth=.55, alpha=.6, zorder=1)
-        local_nodes = nodes.loc[mask]
-        ax.scatter(local_nodes["tree_x"], local_nodes["tree_stage"],
-                   c=[colors[label] for label in local_labels], s=lineage_node_size,
-                   edgecolors="black", linewidths=.25, zorder=2)
+                color="#9FAAB4", linewidth=.8, alpha=.68, zorder=1,
+                solid_capstyle="round")
+        local_sizes = scaled_sizes(
+            local_nodes, lineage_node_size * .8, lineage_node_size * 2.4)
+        ax.scatter(
+            local_nodes["tree_x"], local_nodes["tree_stage"],
+            c=[colors[label] for label in local_labels], s=local_sizes,
+            edgecolors="white", linewidths=.7, zorder=3)
+        label_size = max(6.0, lineage_node_label_size)
         for row in local_nodes.itertuples(index=False):
             label = ax.annotate(
                 str(row.node_id), (row.tree_x, row.tree_stage),
-                xytext=(3, 0), textcoords="offset points",
-                ha="left", va="center", fontsize=lineage_node_label_size,
-                color="black", zorder=4)
+                xytext=(4, 0), textcoords="offset points",
+                ha="left", va="center", fontsize=label_size,
+                color="#27313A", zorder=4)
             label.set_path_effects([
-                path_effects.withStroke(linewidth=1.25, foreground="white")])
-        root = nodes[nodes.node_type.eq("lineage_root") & nodes.lineage.eq(lineage)]
-        ax.scatter(root.tree_x, root.tree_stage, marker="*", s=80,
-                   color="black", zorder=3)
-        handles = [Line2D([0], [0], marker="o", linestyle="", color=colors[label], label=label)
-                   for label in local_types]
-        handles.append(Line2D([0], [0], marker="*", linestyle="", color="black",
-                              markersize=9, label="Lineage root"))
-        ax.legend(handles=handles, loc="center left", bbox_to_anchor=(1, .5),
-                  fontsize=8, ncol=legend_columns, markerscale=1.25,
-                  columnspacing=1, handletextpad=.35)
-        ax.set(xlabel="Branch layout", ylabel="Cell-weighted predicted stage",
-               title=f"{lineage} — {mask.sum()} contracted nodes")
+                path_effects.withStroke(linewidth=2, foreground="white")])
+        root = nodes[
+            nodes.node_type.eq("lineage_root") & nodes.lineage.eq(lineage)]
+        ax.scatter(
+            root.tree_x, root.tree_stage, marker="*", s=145,
+            color="#111820", edgecolors="white", linewidths=.7, zorder=5)
+        handles = [
+            Line2D(
+                [0], [0], marker="o", linestyle="",
+                markerfacecolor=colors[label], markeredgecolor="white",
+                markeredgewidth=.4, color="none", label=label, markersize=7)
+            for label in local_types
+        ]
+        handles.append(Line2D(
+            [0], [0], marker="*", linestyle="", markerfacecolor="#111820",
+            markeredgecolor="white", markeredgewidth=.4, color="none",
+            markersize=11, label="Lineage root"))
+        legend = ax.legend(
+            handles=handles, loc="center left", bbox_to_anchor=(1.015, .5),
+            fontsize=8.5, ncol=legend_columns, markerscale=1,
+            columnspacing=1.25, handletextpad=.45, borderaxespad=0,
+            frameon=True, fancybox=True, framealpha=.96)
+        legend.get_frame().set_edgecolor("#D6DCE1")
+        legend.get_frame().set_linewidth(.7)
+        ax.set_ylabel("Cell-weighted predicted stage")
+        ax.set_xlabel("Developmental branches", labelpad=9)
+        ax.set_title(
+            f"{lineage}: {mask.sum()} contracted nodes", loc="left", pad=14)
+        ax.text(
+            1, 1.012,
+            "Early to late (top to bottom); node area = cell abundance",
+            transform=ax.transAxes, ha="right", va="bottom",
+            fontsize=8.5, color="#69737D")
         ax.invert_yaxis()
-        ax.grid(axis="y", color="#EEEEEE", linewidth=.5)
+        ax.set_xticks([])
+        ax.tick_params(axis="y", labelsize=9)
+        ax.grid(axis="y", color="#E8ECEF", linewidth=.65, zorder=0)
+        ax.spines[["top", "right", "bottom"]].set_visible(False)
+        ax.margins(x=.055, y=.055)
         safe = re.sub(r"[^A-Za-z0-9]+", "_", lineage).strip("_").lower()
         stem = lineage_output / f"{position:02d}_{safe}"
-        fig.savefig(stem.with_suffix(".png"), dpi=dpi, bbox_inches="tight")
-        fig.savefig(stem.with_suffix(".pdf"), bbox_inches="tight")
+        fig.savefig(
+            stem.with_suffix(".png"), dpi=dpi, bbox_inches="tight",
+            facecolor=fig.get_facecolor())
+        fig.savefig(
+            stem.with_suffix(".pdf"), bbox_inches="tight",
+            facecolor=fig.get_facecolor())
         plt.close(fig)
 
     pd.DataFrame({
