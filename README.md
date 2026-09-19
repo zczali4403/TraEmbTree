@@ -192,7 +192,7 @@ Nearest-earlier-node fallback edges ensure reachability when a node has no valid
 
 ### 4. Contract redundant tree nodes
 
-By default, only nodes along nonbranching paths can merge. Lineage roots and anchor-to-anchor edges are protected. Merge decisions use embedding distance and stage only.
+By default, only nodes along nonbranching paths can merge. Lineage roots and anchor-to-anchor edges are protected. Merge decisions use embedding distance and stage only. `--max-stage-span` is the maximum difference between the node-level cell-weighted mean stages in a path-contracted group.
 
 ```bash
 python src/workflow/contract_markov_tree_nodes.py \

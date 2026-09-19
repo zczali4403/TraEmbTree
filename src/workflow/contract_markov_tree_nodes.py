@@ -5,7 +5,8 @@ Consecutive temporal nodes on nonbranching paths may be merged. Optionally,
 similar siblings may also merge when they share a real parent, are close in
 embedding and mean stage, and at least one sibling is a leaf. A final path pass
 cleans up nonbranching chains created by sibling merging. Lineage roots remain
-singleton anchors. Merge decisions never use cell-type labels; those
+singleton anchors. Path stage span is measured across node-level
+cell-weighted mean stages. Merge decisions never use cell-type labels; those
 labels are aggregated afterwards for evaluation and plots.
 """
 from __future__ import annotations
@@ -42,7 +43,8 @@ def parse_args(argv=None):
         help="Largest distance from a candidate node to the current weighted group center.")
     parser.add_argument(
         "--max-stage-span", type=float, default=6.0,
-        help="Largest allowed max_stage-min_stage across a contracted node.")
+        help="Largest allowed max-min cell-weighted mean stage across nodes "
+             "in a path-contracted group.")
     parser.add_argument(
         "--merge-siblings", action="store_true",
         help="After path contraction, iteratively merge eligible sibling nodes.")
@@ -163,16 +165,17 @@ def partition_chain(chain, real_lookup, unit_embeddings, raw_embeddings,
     for node in chain:
         row = real_lookup.loc[node]
         weight = float(row.n_cells)
+        node_stage = float(row.cell_weighted_mean_stage)
         if not current:
             current = [node]
             weighted_sum = raw_embeddings[node].astype(np.float64) * weight
-            group_min_stage = float(row.min_stage)
-            group_max_stage = float(row.max_stage)
+            group_min_stage = node_stage
+            group_max_stage = node_stage
             continue
         center = weighted_sum / max(np.linalg.norm(weighted_sum), 1e-12)
         distance = max(0.0, 1.0 - float(center @ unit_embeddings[node]))
-        candidate_min = min(group_min_stage, float(row.min_stage))
-        candidate_max = max(group_max_stage, float(row.max_stage))
+        candidate_min = min(group_min_stage, node_stage)
+        candidate_max = max(group_max_stage, node_stage)
         if distance <= max_distance and candidate_max - candidate_min <= max_stage_span:
             current.append(node)
             weighted_sum += raw_embeddings[node] * weight
@@ -182,8 +185,8 @@ def partition_chain(chain, real_lookup, unit_embeddings, raw_embeddings,
             groups.append(current)
             current = [node]
             weighted_sum = raw_embeddings[node].astype(np.float64) * weight
-            group_min_stage = float(row.min_stage)
-            group_max_stage = float(row.max_stage)
+            group_min_stage = node_stage
+            group_max_stage = node_stage
     if current:
         groups.append(current)
     return groups
@@ -907,7 +910,11 @@ def main(argv=None):
             temporary / "node_celltype_composition.parquet", index=False)
         np.save(temporary / "node_embeddings.npy", contracted_embeddings)
         group_sizes = np.asarray([len(group) for group in groups])
-        stage_spans = contracted_real.max_stage - contracted_real.min_stage
+        source_stage = real.set_index("node_id").cell_weighted_mean_stage
+        stage_spans = np.asarray([
+            float(source_stage.loc[group].max() - source_stage.loc[group].min())
+            for group in groups
+        ])
         chain_merged_anchors = {
             node for group in chain_groups if len(group) > 1
             for node in group if node in anchors
@@ -939,6 +946,8 @@ def main(argv=None):
             "median_source_nodes_per_contracted_node": float(np.median(group_sizes)),
             "median_contracted_stage_span": float(np.median(stage_spans)),
             "max_contracted_stage_span": float(stage_spans.max()),
+            "stage_span_definition": (
+                "max-min cell_weighted_mean_stage across source temporal nodes"),
             "max_cosine_distance": float(args.max_cosine_distance),
             "max_stage_span": float(args.max_stage_span),
             "merge_siblings": bool(args.merge_siblings),
