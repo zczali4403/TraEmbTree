@@ -2,7 +2,7 @@
 
 This repository provides a reproducible workflow for constructing lineage-aware developmental trees from TraEmb cell embeddings.
 
-Cell-type labels are excluded from microcell construction, Leiden clustering, graph construction, tree extraction, and node contraction. They are joined only after assignments have been fixed and are used for annotation and evaluation.
+Cell-type labels are excluded from microcell construction, Leiden clustering, temporal segmentation, graph construction, tree extraction, and node contraction. They are joined only after assignments have been fixed and are used for annotation and evaluation.
 
 ## Workflow overview
 
@@ -16,6 +16,9 @@ cell embeddings + lineage + predicted stage
        lineage-local Leiden states
                     |
                     v
+       adaptive temporal segmentation
+                    |
+                    v
           temporal trajectory nodes
                     |
                     v
@@ -26,6 +29,9 @@ cell embeddings + lineage + predicted stage
                     |
                     v
        nonbranching-path contraction
+                    |
+                    v
+ topology-aware sibling merging and cleanup
 ```
 
 Known lineage is a hard stratum. Predicted stage is used for fixed-width microcell strata, temporal subdivision, edge direction, early-root selection, and node-level mean-stage span limits during contraction.
@@ -40,7 +46,7 @@ src/
 results/            Local generated outputs; ignored by Git except its README
 ```
 
-The retained 0914 run, including exact inputs, parameters, statistics, purity, and decoded-expression outputs, is documented in [results/README.md](results/README.md).
+The retained 0914 run, including exact inputs, parameters, statistics, purity, and principal audit outputs, is documented in [results/README.md](results/README.md).
 
 ## Environment
 
