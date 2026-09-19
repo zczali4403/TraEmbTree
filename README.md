@@ -145,13 +145,12 @@ python src/workflow/discover_leiden_trajectory_nodes.py \
   --stage-min-peak-distance 1.0 \
   --stage-valley-ratio 0.6 \
   --max-node-stage-span 3 \
-  --min-segment-metacells 3 \
   --min-node-cells 50 \
   --threads 32 \
   --seed 42
 ```
 
-The maximum-span rule is a support-constrained safeguard: a broad segment is split only when both sides retain the requested minimum cells and metacells. `temporal_split_diagnostics.parquet` records KDE peaks, accepted valleys, small-segment merges, median splits, and final segment counts for every Leiden state.
+The maximum-span rule is a support-constrained safeguard: a broad segment is split only when both sides retain the requested minimum number of cells. Adaptive segment support is cell-count based; no minimum metacell count is imposed. `temporal_split_diagnostics.parquet` records KDE peaks, accepted valleys, small-segment merges, median splits, and final segment counts for every Leiden state.
 
 Principal outputs:
 
