@@ -28,7 +28,7 @@ cell embeddings + lineage + predicted stage
        nonbranching-path contraction
 ```
 
-Known lineage is a hard stratum. Predicted stage is used for fixed-width microcell strata, temporal subdivision, edge direction, early-root selection, and contraction span limits.
+Known lineage is a hard stratum. Predicted stage is used for fixed-width microcell strata, temporal subdivision, edge direction, early-root selection, and node-level mean-stage span limits during contraction.
 
 ## Repository layout
 
@@ -192,7 +192,7 @@ Nearest-earlier-node fallback edges ensure reachability when a node has no valid
 
 ### 4. Contract redundant tree nodes
 
-By default, only nodes along nonbranching paths can merge. Lineage roots and anchor-to-anchor edges are protected. Merge decisions use embedding distance and stage only. `--max-stage-span` is the maximum difference between the node-level cell-weighted mean stages in a path-contracted group.
+By default, only nodes along nonbranching paths can merge. Lineage roots and anchor-to-anchor edges are protected. Merge decisions use embedding distance and stage only. `--max-stage-span` is the maximum difference between the node-level `cell_weighted_mean_stage` values in a path-contracted group; it does not use the full cell-level `max_stage - min_stage` envelope.
 
 ```bash
 python src/workflow/contract_markov_tree_nodes.py \
@@ -204,7 +204,7 @@ python src/workflow/contract_markov_tree_nodes.py \
   --dpi 220
 ```
 
-Optional topology-simplifying sibling merging runs after path contraction. Two siblings may merge when they share a real temporal-node parent, have cosine distance at most 0.20 and mean-stage gap at most 1.0, and at least one is a leaf. Direct children of lineage virtual roots are not merged. A second path-contraction pass then removes any new nonbranching chains created by sibling merging.
+Optional topology-simplifying sibling merging runs after path contraction. Two siblings may merge when they share a real temporal-node parent, satisfy the configured cosine-distance and mean-stage-gap thresholds, and at least one is a leaf. Direct children of lineage virtual roots are not merged. A second path-contraction pass then removes any new nonbranching chains created by sibling merging.
 
 ```bash
 python src/workflow/contract_markov_tree_nodes.py \
@@ -228,7 +228,7 @@ Principal outputs:
 - `node_celltype_composition.parquet`: post-contraction annotation;
 - plots, `summary.json`, and `run_config.json`.
 
-The script verifies that branch topology, total cell count, and total microcell count are preserved. Markov probabilities are not recomputed after contraction.
+The script verifies the temporal-node partition and preserves total cell and microcell counts. Path contraction preserves protected structural anchors; optional sibling merging intentionally simplifies eligible local topology and records every event in `sibling_merge_history.parquet`. Markov probabilities are not recomputed after contraction.
 
 Regenerate plots without rerunning contraction:
 
