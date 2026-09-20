@@ -41,7 +41,7 @@ Known lineage is a hard stratum. Predicted stage is used for fixed-width microce
 ```text
 src/
 ├── workflow/       Core microcell, node, tree, and contraction stages
-├── utilities/      Purity evaluation and embedding decoding
+├── utilities/      Purity evaluation, tree diagnostics, and embedding decoding
 └── visualization/  UMAP, PHATE, diffusion-map, and tree visualizations
 results/            Local generated outputs; ignored by Git except its README
 ```
@@ -266,6 +266,30 @@ python src/utilities/evaluate_node_purity.py \
 ```
 
 Purity is an external evaluation using post-hoc annotations, not an optimization target.
+
+### Contracted-tree diagnostics
+
+Summarize temporal edge gaps, terminal-node timing, and the number of cells in
+each contracted temporal node:
+
+```bash
+python src/utilities/summarize_contracted_tree.py \
+  --tree-dir results/contracted_tree \
+  --short-edge-threshold 1.0 \
+  --dpi 220
+```
+
+The edge-gap analysis uses only edges between real temporal nodes; global-root
+and lineage-root virtual edges are excluded. A terminal node is a real temporal
+node with no real temporal-node child. By default, outputs are written to
+`results/contracted_tree/tree_statistics/`:
+
+- `summary.json`: overall counts, proportions, and distribution quantiles;
+- `edge_stage_gaps.csv`: parent and child stages for every real tree edge;
+- `terminal_nodes.csv`: the stage and annotation of every terminal node;
+- `node_cell_counts.csv`: cell support and annotation for every temporal node;
+- `lineage_summary.csv`: the same principal counts summarized by lineage;
+- `tree_statistics.png` and `tree_statistics.pdf`: a three-panel summary figure.
 
 ## Decode contracted-node embeddings
 
